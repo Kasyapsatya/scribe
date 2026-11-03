@@ -10,7 +10,7 @@ import drafting as D
 import specialists as X
 import steward
 import store
-import export
+import chat_sync
 from config import USER_KEY, team_key, secret
 from study import DATA, load_study, seg_name, signature
 
@@ -101,8 +101,10 @@ def render(msg, idx, last):
             elif t == "chart": st.plotly_chart(pio.from_json(a["fig"]), width="stretch", key=f"c{idx}_{k}")
             elif t == "memo":
                 with st.expander("Memo preview", expanded=False): st.markdown(a["html"], unsafe_allow_html=True)
-            elif t == "file" and Path(a["path"]).exists():
-                st.download_button("⬇ Download the draft memo (.docx)", Path(a["path"]).read_bytes(), Path(a["path"]).name, key=f"f{idx}_{k}")
+            elif t == "file":
+                if Path(a["path"]).exists():
+                    st.download_button("⬇ Download the draft memo (.docx)", Path(a["path"]).read_bytes(), Path(a["path"]).name, key=f"f{idx}_{k}")
+                else: st.caption("The Word file from this draft is no longer on the server — ask “draft the memo” to rebuild it.")
             elif t == "graph": st.graphviz_chart(a["dot"])
             elif t == "steps": steps = a
             elif t == "suggestions" and last:
@@ -197,7 +199,7 @@ def handle(prompt, files):
             with st.spinner("Working on it…"):
                 text, arts = (readiness() if kind == "readiness" else (ABOUT, [dict(type="graph", dot=DOT)]) if kind == "about"
                               else do_analyse(prompt, history))
-    store.add(cid, "assistant", text, arts)
+    store.add(cid, "assistant", text, arts); chat_sync.save(cid)        # every chat is kept in the team repo automatically
 
 
 # ---------------- layout ----------------
@@ -211,19 +213,16 @@ head.markdown(f'<div class="brand"><img src="data:image/png;base64,{logo}" heigh
 if new.button("＋ New chat", width="stretch", type="primary"):
     st.session_state.chat = store.new_chat(); store.add(st.session_state.chat, "assistant", *readiness()); st.rerun()
 with hist.popover("Chats", width="stretch"):                  # always visible (the sidebar collapses on narrow screens)
+    chat_sync.pull()                                           # the team's chats from GitHub (at most once a minute)
     for cid, title, created in store.chats():
         label = f"{'▸ ' if cid == st.session_state.chat else ''}{title} · {time.strftime('%d %b %H:%M', time.localtime(created))}"
         if st.button(label, key=f"chat_{cid}", width="stretch"):
             st.session_state.chat = cid; st.rerun()
     st.divider()
-    if export.repo_ready():
-        asked = any(m["role"] == "user" for m in store.messages(st.session_state.chat))
-        if st.button("⬆ Save this chat to the team repo", width="stretch", disabled=not asked):
-            try: st.toast(f"Saved to the repo: {export.push(st.session_state.chat).split('/')[-1]}")
-            except RuntimeError as e: st.toast(str(e))
-    else:
-        name, md_text = export.to_markdown(st.session_state.chat)
-        st.download_button("⬇ Download this chat (.md)", md_text, name, width="stretch")
+    name, md_text = chat_sync.to_markdown(st.session_state.chat)
+    st.download_button("⬇ Download this chat (.md)", md_text, name, width="stretch")
+    st.caption(chat_sync.STATUS["error"] or (f"Chats are saved to GitHub automatically (branch `{chat_sync.branch()}`)." if chat_sync.enabled()
+               else "Chats are kept on this server only."))
 if SHOW_KEY:
     with gear[0].popover("⚙", help="Use your own Gemini API key"):
         k = st.text_input("Your Gemini API key (optional)", value=st.session_state.get("user_key", ""), type="password",

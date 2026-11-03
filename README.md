@@ -27,12 +27,13 @@ If Gemini is unavailable (quota or network) Scribe says so: the Analyst points y
 ## Share with the team (Streamlit Community Cloud, free)
 1. Push this folder to a **private** GitHub repo (`.gitignore` keeps `secrets.toml` and `output/` out).
 2. On [share.streamlit.io](https://share.streamlit.io): **Create app** → the repo, branch `main`, main file `app.py`; *Advanced settings* → Python 3.12
-   and paste your secrets (see `.streamlit/secrets.toml.example`: `GOOGLE_API_KEY`, and `GITHUB_TOKEN` / `GITHUB_REPO` for chat export).
+   and paste your secrets (see `.streamlit/secrets.toml.example`: `GOOGLE_API_KEY`, plus `GITHUB_TOKEN` / `GITHUB_REPO` to keep chats in the repo).
 3. **Share** → invite teammates by email (the app stays private to invited viewers; Community Cloud allows one private app per account).
 - Teammates can paste their own Gemini key under **⚙** (kept for their browser session only); otherwise the team key is used.
   Set `SHOW_KEY_SETTINGS = false` in secrets to hide ⚙.
-- **Chats → ⬆ Save this chat to the team repo** writes the chat to `chats/` as Markdown. Hosted chat history resets when the app restarts;
-  the exported files are the permanent reference.
+- With `GITHUB_TOKEN` / `GITHUB_REPO` set, every chat is saved to the repo automatically after each reply (`chats/` on the `chats`
+  branch, created by the app so saves never redeploy it) and the **Chats** list shows the team's chats, also after restarts. Each file is a
+  readable Markdown reference. Without a token, chats stay on the server and reset when the hosted app restarts; **Chats → ⬇** downloads one.
 - Files a teammate uploads stay in their own session; the shared study in `data/inputs/` changes only through the repo.
 
 ## Files
@@ -46,8 +47,8 @@ If Gemini is unavailable (quota or network) Scribe says so: the Analyst points y
 | `steward.py` | Data Steward (readiness check) |
 | `study.py` | Apollo parser (label + column number), shared Result format and number formatting |
 | `store.py` | SQLite chat storage |
-| `export.py` | Chat → Markdown reference, saved to the repo's `chats/` (GitHub API) or downloaded |
-| `chats/` | Exported chats (references) |
+| `chat_sync.py` | Chats ↔ the team repo: saved after every reply, pulled into the Chats list (GitHub API) |
+| `chats/` | Saved chats (Markdown references; the app reads them back) |
 | `config.py` | Secrets, per-session key, per-key rate limit, Gemini model selection (timeouts, no retries) |
 | `gen_synthetic.py` | Regenerates the synthetic study in `data/inputs/` and `data/golden_labels.json` |
 | `evaluate.py` | Evaluation suite: `python evaluate.py` (add `--qa` to include the Gemini Q&A set) |

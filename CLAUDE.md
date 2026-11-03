@@ -17,7 +17,7 @@ Out of scope: re-running Apollo or recalculating method indications. What-ifs on
   A teammate may enter their own key under ⚙ (header): held in memory for that browser session only, never stored, shown or logged; empty → team key.
   `SHOW_KEY_SETTINGS = false` hides ⚙. Cool-downs and the rate limiter are tracked **per key** (fingerprint), so one exhausted key never blocks another. Every call has a 20 s timeout and no retry loops; on quota/network failure the app says so plainly and never hangs (drafting still works: it is code-led).
 - **Gemini call budget:** memo draft = 1 call (all narrative sections polished together) + 1 Brief-agent call only when the request carries instructions; analysis question = 2–3 calls (tool choice → answer); first use = 1 extra probe (model cached 24 h). A per-key limiter keeps calls under `GEMINI_RPM` (secrets, default 5/min); a per-minute 429 pauses Gemini only for Google's retry delay, a daily-quota 429 for an hour. Agno returns API errors as content with status ERROR — always check status.
-- No UI clutter: logo header with "New chat", "Chats" (history + export) and a small ⚙ (own key) button, chat. A collapsed "How I got this" panel per answer is the only extra.
+- No UI clutter: logo header with "New chat", "Chats" (team history + download) and a small ⚙ (own key) button, chat. A collapsed "How I got this" panel per answer is the only extra.
 - Clean, minimal, non-redundant code with traceable variable origins.
 - **Generalised to the workbooks:** sub-segments, line of business, evaluation date, AYs, ages, averages, methods and weights are all read
   from the packs — nothing is fixed to AL/GL/WC or to this dataset. Narrative follows the data: LDF wording from reason codes (prior retained
@@ -87,9 +87,11 @@ Gemini unavailable → no keyword scripting: the Analyst says Gemini is needed a
 
 ## 6. Storage and sharing
 SQLite `output/scribe.db`: chats (id, title, created) and messages (role, content, artifacts JSON: tables, Plotly JSON, file paths, steps). Header "Chats" button lists past chats; "New chat" starts one.
-On a hosted app the database is shared by the team and is lost when the app restarts; the durable record is the **chat export**: "Chats → ⬆ Save this
-chat to the team repo" writes `chats/<date>_<title>_<id>.md` (question, answer, tables, "how Scribe got this") through the GitHub contents API
-(`export.py`; `GITHUB_TOKEN`, `GITHUB_REPO` in secrets) — else a `.md` download. Uploads go to a private per-session copy of `data/inputs/`
+With `GITHUB_TOKEN` + `GITHUB_REPO` in secrets, `chat_sync.py` keeps every chat in the team repo automatically: after each reply (background
+thread) the chat is written to `chats/<date>_<title>_<id>.md` on branch `GITHUB_BRANCH` (default `chats`, created if missing, so saves never
+redeploy the app) — readable Markdown (questions, answers, tables, how Scribe got them) with the full chat embedded (zlib + base64 in an HTML
+comment). The Chats list pulls new/changed files at most once a minute, so history is shared by the team and survives restarts. Without a token,
+chats stay in the local SQLite only; "Chats → ⬇" downloads one. Uploads go to a private per-session copy of `data/inputs/`
 (`output/sessions/<id>/`), so one user's files never change the study others see. Memo files are named per chat (`…_<chat id>.docx` + `.evidence.json`).
 
 ## 7. Stack
@@ -103,7 +105,7 @@ Table tie-outs to §4 columns; PYD prior-only; readiness detects a removed file;
 ## 9. Locked decisions
 v1 (still valid): synthetic AYs 1995–2024; claims at 2023Q4 and 2024Q4; net = 75% of gross (25% QS); sub-segments AL/GL/WC; AvE by AY gross & net; ADC paragraph dropped; Gemini free tier via Agno.
 v2 (2026-11-03): PYD = Comparison col 12; reinsurance ratio = EP only; formats per §4; official Accenture logo (`assets/accenture.png`, supplied by KK); what-ifs take Apollo indications and may re-weight, never recalculate — ask or state the BF paid/incurred assumption; data folder **and** chat uploads; one memo for all three sub-segments; chats stored; no model/key on the UI.
-v2.2 (2026-11-03): hosted on Streamlit Community Cloud from a private GitHub repo for the team; optional per-session Gemini key (⚙, hideable); chats exported to the repo `chats/` as references.
+v2.2 (2026-11-03): hosted on Streamlit Community Cloud from a private GitHub repo for the team; optional per-session Gemini key (⚙, hideable); every chat saved automatically to the repo (`chats` branch) and reloaded into the Chats list.
 v2.1 (2026-11-03): drafting follows the user's instructions through a validated drafting brief (§5a) on top of the fixed rules; sensitivity scenarios
 are chosen by the user (default lowest/highest of all methods, stated in the memo); unsupported requests are reported, never silently dropped.
 Synthetic Apollo packs mirror the sample's tabs and column numbering; incurred adjuster = paid adjuster (no adjuster case reserve); `SelUltiLegalDev` and method-detail tabs (DFM/BF/CC detail, Adjuster tabs) are not generated.

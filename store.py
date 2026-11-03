@@ -39,6 +39,15 @@ def chats(limit=30):
                          "ORDER BY c.created DESC LIMIT ?", (limit,)).fetchall()
 
 
+def replace_chat(chat_id, title, created, msgs):
+    """Write a whole chat as loaded from the team repo (replaces any local copy)."""
+    with _con() as c:
+        c.execute("INSERT OR REPLACE INTO chats VALUES (?, ?, ?)", (chat_id, title, created))
+        c.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        c.executemany("INSERT INTO messages (chat_id, role, content, artifacts, created) VALUES (?, ?, ?, ?, ?)",
+                      [(chat_id, m["role"], m["content"], json.dumps(m["artifacts"]), created) for m in msgs])
+
+
 def chat(chat_id):
     """(title, created) of one chat."""
     with _con() as c: return c.execute("SELECT title, created FROM chats WHERE id = ?", (chat_id,)).fetchone()
