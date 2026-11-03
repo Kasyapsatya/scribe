@@ -95,7 +95,7 @@ chats stay in the local SQLite only; "Chats → ⬇" downloads one. Uploads go t
 (`output/sessions/<id>/`), so one user's files never change the study others see. Memo files are named per chat (`…_<chat id>.docx` + `.evidence.json`).
 
 ## 7. Stack
-Python 3.11+, openpyxl/pandas (tidy fact table), Agno + Gemini (model auto-resolved and cached; key in secrets), Plotly, python-docx, Streamlit ≥ 1.43 (chat file upload). Theme in `.streamlit/config.toml` (Accenture purple `#A100FF`, black/white).
+Python 3.11+, openpyxl/pandas (tidy fact table), Agno + Gemini (model auto-resolved and cached; key in secrets), Plotly, python-docx, Streamlit pinned to 1.56.0 (1.58+ switched to a Starlette/uvicorn server; on Community Cloud its static JS files time out with HTTP 500 and the page never loads). Theme in `.streamlit/config.toml` (Accenture purple `#A100FF`, black/white).
 
 ## 8. Evaluation (`python evaluate.py`)
 Brief: Gemini only for instructed drafts; validation applies supported choices and rejects invented figures/text/options; memo follows the brief

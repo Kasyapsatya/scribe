@@ -3,6 +3,6 @@ numpy>=1.26
 openpyxl>=3.1
 python-docx>=1.1
 plotly>=5.20
-streamlit>=1.50
+streamlit==1.56.0          # pinned: 1.58+ uses a new web server whose files time out on Streamlit Community Cloud
 agno>=2.0
 google-genai>=1.30
