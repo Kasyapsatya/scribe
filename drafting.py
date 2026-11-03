@@ -438,7 +438,7 @@ class Draft:
     flags: int
 
 
-def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=(), assumptions=()):
+def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=(), assumptions=(), tag=""):
     """Drafting team: build to the brief → verify → (optional LLM polish, verifier-gated) → assemble."""
     t0 = time.time(); OUT.mkdir(exist_ok=True); C = Citations(); b = brief or B.DEFAULT
     if b["segments"]: S = S.only(b["segments"])
@@ -451,9 +451,9 @@ def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=()
     issues = {s["id"]: verify(s, C) for s in secs}
     trace("4 Verifier", f"{sum(not v for v in issues.values())}/{len(secs)} sections tie out to source cells")
     if polish: polish(secs, C, trace)
-    path = OUT / f"DVR_Draft_{S.lob.replace(' ', '_')}_{S.evaluation}.docx"
+    path = OUT / f"DVR_Draft_{S.lob.replace(' ', '_')}_{S.evaluation}{'_' + tag if tag else ''}.docx"     # tag = chat id: users never overwrite each other
     assemble(secs, C, path, f"DVR — {S.lob} ({', '.join(seg_name(s) for s in S.segments)}) — {S.evaluation}")
-    (OUT / "evidence_log.json").write_text(json.dumps({k: dict(v, rendered=fmt(v["value"], v["unit"], "text")) for k, v in C.items.items()}, indent=1))
+    path.with_suffix(".evidence.json").write_text(json.dumps({k: dict(v, rendered=fmt(v["value"], v["unit"], "text")) for k, v in C.items.items()}, indent=1))
     flags = sum(json.dumps(s["blocks"]).count("[INPUT REQUIRED") for s in secs)
     trace("5 Assembler", f"Wrote {path.name}: {len(secs)} sections, {len(C.items)} cited figures, {flags} input-required flags")
     return Draft(secs, C, path, issues, time.time() - t0, flags)

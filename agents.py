@@ -1,25 +1,26 @@
 """Agent 0 Orchestrator (router), Agent 3 Analyst (Gemini plans + specialist tools), chat Verifier, and the verifier-gated
 memo polish. The Analyst never falls back to keyword scripting: without Gemini it says so and points to the relevant tabs."""
 import json, re, time
-from config import resolve_model, make_client, is_quota_error, forget_model, retry_after
+from config import resolve_model, make_client, is_quota_error, forget_model, retry_after, key_id
 from study import seg_name
 import specialists as X
 import drafting as D
 import brief as B
 
-GEMINI = {"until": 0.0, "why": ""}  # cool-down after an API failure: per-minute limit → Google's retry delay; daily / network → longer
+_COOLDOWN = {}      # key fingerprint → {"until", "why"}: per-minute limit → Google's retry delay; daily / network → longer
+
+
+def gemini_state():
+    """Cool-down state of the API key in use by this session (one teammate's exhausted key never blocks another's)."""
+    return _COOLDOWN.setdefault(key_id(), {"until": 0.0, "why": ""})
 
 
 def gemini_model():
     """Model id if Gemini is usable now, else None (never raises)."""
-    if time.time() < GEMINI["until"]: return None
+    if time.time() < gemini_state()["until"]: return None
     try: return resolve_model()
     except Exception as e:
         _api_failed(e); return None
-
-
-def gemini_ok():
-    return time.time() >= GEMINI["until"]
 
 
 def _agent(instructions, tools=None):
@@ -32,9 +33,12 @@ def _agent(instructions, tools=None):
 def _api_failed(e):
     """Pause Gemini for as long as the error warrants instead of switching it off for the session."""
     if "404" in str(e) or "not enabled" in str(e).lower(): forget_model()
+    bad_key = "API_KEY_INVALID" in str(e) or "API key not valid" in str(e)
     wait = retry_after(e) if is_quota_error(e) else None
-    GEMINI["until"] = time.time() + (wait + 1 if wait else 3600 if is_quota_error(e) else 60)
-    GEMINI["why"] = ("Gemini per-minute limit reached" if wait else "Gemini daily quota reached" if is_quota_error(e) else "Gemini unreachable")
+    state = gemini_state()
+    state["until"] = time.time() + (wait + 1 if wait else 3600 if is_quota_error(e) else 30 if bad_key else 60)
+    state["why"] = ("Gemini rejected the API key — check it under ⚙" if bad_key else "Gemini per-minute limit reached" if wait
+                 else "Gemini daily quota reached for this key" if is_quota_error(e) else "Gemini unreachable")
 
 
 def _run(agent, prompt):
@@ -187,15 +191,15 @@ def analyse(S, text, history):
             turn["steps"].append(("4 Verifier", f"{n - len(bad)}/{n} figures traced to tool results" + (f"; untraced: {', '.join(bad)}" if bad else "")))
             return answer, turn["results"], turn["steps"], bad, True
         except Exception as e:
-            _api_failed(e); turn["steps"].append(("0 Orchestrator", f"{GEMINI['why']} while writing the answer"))
+            _api_failed(e); turn["steps"].append(("0 Orchestrator", f"{gemini_state()['why']} while writing the answer"))
             if turn["results"]:                          # Gemini had already chosen the specialists: show what they returned
-                return (f"{GEMINI['why']} before Gemini could write its commentary. These are the exhibits Gemini chose for this question:\n\n"
+                return (f"{gemini_state()['why']} before Gemini could write its commentary. These are the exhibits Gemini chose for this question:\n\n"
                         + "\n".join(headline(r) for r in turn["results"])), turn["results"], turn["steps"], [], False
     hits = X.navigate(S, text)[:4]
     turn["steps"].append(("3a Study Navigator", "Searched the tab catalogue (no AI) to point you to the right exhibits"))
     tabs = "; ".join(f"**{h['tab']}** ({h['title']})" for h in hits) or "none matched — try naming the exhibit"
-    return (f"{GEMINI['why'] or 'Gemini is unavailable'}. The Analyst needs Gemini to plan which exhibits to read, so I can't answer this "
-            f"one right now — {'it will work again once the limit resets' if 'quota' in GEMINI['why'] or 'limit' in GEMINI['why'] else 'please try again shortly'}. "
+    return (f"{gemini_state()['why'] or 'Gemini is unavailable'}. The Analyst needs Gemini to plan which exhibits to read, so I can't answer this "
+            f"one right now — {'it will work again once the limit resets' if 'quota' in gemini_state()['why'] or 'limit' in gemini_state()['why'] else 'please try again shortly'}. "
             f"The Apollo tabs most relevant to your question: {tabs}."), [], turn["steps"], [], False
 
 
@@ -223,7 +227,7 @@ Omit fields the user did not mention."""
 
 def read_brief(S, text, prev):
     """Brief agent. Returns (brief, rejected, assumptions, question); rejected = [(request, reason)]. Raises if Gemini is unavailable."""
-    if not gemini_model(): raise RuntimeError(GEMINI["why"] or "Gemini unavailable")
+    if not gemini_model(): raise RuntimeError(gemini_state()["why"] or "Gemini unavailable")
     lo, hi = B._years(S)
     rules = BRIEF_RULES
     for k, v in dict(lob=S.lob, segments=", ".join(f"{s} ({seg_name(s)})" for s in S.segments), ays=f"{lo}–{hi}", evaluation=S.evaluation,
@@ -234,7 +238,7 @@ def read_brief(S, text, prev):
         out = json.loads(re.search(r"\{.*\}", re.sub(r"```(json)?", "", _run(_agent(rules), f"Instruction: {text}")), re.S).group(0))
     except Exception as e:
         if not isinstance(e, (ValueError, AttributeError)): _api_failed(e)
-        raise RuntimeError(GEMINI["why"] or "unreadable reply from Gemini")
+        raise RuntimeError(gemini_state()["why"] or "unreadable reply from Gemini")
     brief, bad = B.validate(out.get("changes") or {}, S, text, prev)
     figs = B._figures(text)
     keep = lambda a: all(float(x) in figs for x in re.findall(r"\d+(?:\.\d+)?", a.replace(",", "")) if not 1900 <= float(x) <= 2100)
@@ -253,7 +257,7 @@ Return ONLY a JSON object with the same keys, each a list of the same length and
 def polish_memo(sections, C, trace):
     """All narrative sections in ONE Gemini call. A sentence that fails tie-out keeps its drafted text."""
     if not gemini_model():
-        trace("2 Drafting team", f"{GEMINI['why'] or 'Gemini unavailable'} — memo uses code-drafted wording (all figures cited)"); return
+        trace("2 Drafting team", f"{gemini_state()['why'] or 'Gemini unavailable'} — memo uses code-drafted wording (all figures cited)"); return
     idx = {s["id"]: [i for i, b in enumerate(s["blocks"]) if b[0] in ("p", "b")] for s in sections if s["narrative"]}
     by_id = {s["id"]: s for s in sections}
     src = {k: [by_id[k]["blocks"][i][1] for i in v] for k, v in idx.items() if v}
@@ -262,7 +266,7 @@ def polish_memo(sections, C, trace):
         out = json.loads(re.search(r"\{.*\}", re.sub(r"```(json)?", "", reply), re.S).group(0))
     except Exception as e:
         if not isinstance(e, (ValueError, AttributeError)): _api_failed(e)
-        trace("2 Drafting team", f"Gemini polish skipped ({GEMINI['why'] or 'unreadable reply'}) — code-drafted wording kept"); return
+        trace("2 Drafting team", f"Gemini polish skipped ({gemini_state()['why'] or 'unreadable reply'}) — code-drafted wording kept"); return
     kept = total = 0
     for k, old_list in src.items():
         new_list = out.get(k) if isinstance(out.get(k), list) and len(out.get(k)) == len(old_list) else [None] * len(old_list)

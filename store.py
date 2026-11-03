@@ -39,6 +39,11 @@ def chats(limit=30):
                          "ORDER BY c.created DESC LIMIT ?", (limit,)).fetchall()
 
 
+def chat(chat_id):
+    """(title, created) of one chat."""
+    with _con() as c: return c.execute("SELECT title, created FROM chats WHERE id = ?", (chat_id,)).fetchone()
+
+
 def last_answer(question):
     """Most recent stored Gemini answer to the same question — used when Gemini is unavailable."""
     with _con() as c:

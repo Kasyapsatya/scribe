@@ -1,24 +1,42 @@
-"""Secrets + Gemini model selection. The key and any model override live ONLY in .streamlit/secrets.toml (git-ignored);
-nothing here is shown on the UI."""
-import json, os, re, threading, time, tomllib
+"""Secrets + Gemini model selection. The team key and settings live ONLY in secrets (`.streamlit/secrets.toml`, git-ignored, or the
+hosting platform's secrets, exposed as environment variables). A teammate may supply their own key for their browser session: it is held
+in memory for that session only (USER_KEY), never written anywhere, and takes precedence over the team key. Nothing here is shown on the UI."""
+import contextvars, hashlib, json, os, re, threading, time, tomllib
 from pathlib import Path
 
 SECRETS = Path(__file__).parent / ".streamlit" / "secrets.toml"
+USER_KEY = contextvars.ContextVar("user_key", default="")      # set by the app at the start of every run of a session
 
 
 class MissingKeyError(RuntimeError):
     pass
 
 
+def secret(name, default=None):
+    """A setting from the secrets file, else from the environment (how hosted platforms expose secrets)."""
+    try: value = tomllib.loads(SECRETS.read_text()).get(name) if SECRETS.exists() else None
+    except tomllib.TOMLDecodeError: value = None
+    return value if value not in (None, "") else os.environ.get(name, default)
+
+
+def team_key():
+    key = str(secret("GOOGLE_API_KEY", "")).strip()
+    return "" if key.startswith("paste") else key
+
+
 def load_api_key():
-    """Read GOOGLE_API_KEY from the secrets file and expose it to the Gemini SDK. Fails loudly if absent."""
-    if not SECRETS.exists():
-        raise MissingKeyError(f"Secrets file not found: {SECRETS}\nCopy .streamlit/secrets.toml.example to secrets.toml and paste your Gemini key.")
-    key = tomllib.loads(SECRETS.read_text()).get("GOOGLE_API_KEY", "").strip()
-    if not key or key.startswith("paste"):
-        raise MissingKeyError(f"GOOGLE_API_KEY is empty in {SECRETS}. Get a free key at https://aistudio.google.com/apikey")
-    os.environ["GOOGLE_API_KEY"] = key          # agno / google-genai read it from the process env
+    """The key for this session: the user's own if given, else the team key. Fails loudly if neither exists."""
+    key = USER_KEY.get().strip() or team_key()
+    if not key:
+        raise MissingKeyError("No Gemini API key: add GOOGLE_API_KEY to .streamlit/secrets.toml (or the app's secrets). "
+                              "Get a free key at https://aistudio.google.com/apikey")
     return key
+
+
+def key_id():
+    """Short fingerprint of the active key, so quota cool-downs and rate limits are tracked per key (never the key itself)."""
+    try: return hashlib.sha256(load_api_key().encode()).hexdigest()[:10]
+    except MissingKeyError: return "none"
 
 
 # ---------------- model selection: never hardcode a model that Google can retire ----------------
@@ -40,12 +58,12 @@ def is_quota_error(e):
 
 
 class _RateLimiter:
-    """Sliding 60-second window shared by every Gemini call in the process, so the free tier's requests-per-minute
-    limit is never exceeded: a call waits for a free slot instead of failing with 429."""
+    """Sliding 60-second window per API key, so a key's free-tier requests-per-minute limit is never exceeded:
+    a call waits for a free slot instead of failing with 429."""
     def __init__(self): self.calls, self.lock = [], threading.Lock()
 
     def wait(self):
-        rpm = int(tomllib.loads(SECRETS.read_text()).get("GEMINI_RPM", 5))   # free tier: 5 requests/minute per model
+        rpm = int(secret("GEMINI_RPM", 5))                                    # free tier: 5 requests/minute per model
         with self.lock:
             now = time.time(); self.calls = [t for t in self.calls if now - t < 60]
             if len(self.calls) >= rpm:
@@ -53,7 +71,7 @@ class _RateLimiter:
             self.calls.append(now)
 
 
-LIMITER = _RateLimiter()
+LIMITERS = {}                                                             # key fingerprint → limiter
 
 
 def retry_after(e):
@@ -70,9 +88,9 @@ def make_client():
     from google.genai import types
     client = genai.Client(api_key=load_api_key(),
                           http_options=types.HttpOptions(timeout=TIMEOUT_MS, retry_options=types.HttpRetryOptions(attempts=1)))
-    call = client.models.generate_content
+    call, limiter = client.models.generate_content, LIMITERS.setdefault(key_id(), _RateLimiter())
     def limited(*a, **k):
-        LIMITER.wait(); return call(*a, **k)
+        limiter.wait(); return call(*a, **k)
     client.models.generate_content = limited
     return client
 
@@ -116,7 +134,7 @@ def resolve_model(max_seconds=60):
     otherwise lists models and probes candidates, newest first, within max_seconds.
     Raises QuotaExhausted if every candidate is rate-limited, RuntimeError if none works."""
     global _MODEL
-    preferred = tomllib.loads(SECRETS.read_text()).get("SCRIBE_MODEL", "").strip()   # optional override
+    preferred = str(secret("SCRIBE_MODEL", "")).strip()                       # optional override
     cached = cached_model()
     if _MODEL: return _MODEL
     if cached and (not preferred or preferred == cached):

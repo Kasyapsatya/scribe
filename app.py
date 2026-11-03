@@ -1,6 +1,6 @@
 """Scribe — single chat over an Apollo reserve study: Draft the DVR memo, or Analyse the study. Run: streamlit run app.py"""
 from pathlib import Path
-import base64, re, time
+import base64, re, shutil, time, uuid
 import pandas as pd
 import plotly.io as pio
 import streamlit as st
@@ -10,7 +10,8 @@ import drafting as D
 import specialists as X
 import steward
 import store
-from config import load_api_key, MissingKeyError
+import export
+from config import USER_KEY, team_key, secret
 from study import DATA, load_study, seg_name, signature
 
 ROOT = Path(__file__).parent
@@ -55,18 +56,21 @@ header[data-testid="stHeader"] {background: transparent; height: 2.5rem}
 [data-testid="stPopoverBody"] button {justify-content:flex-start}
 </style>""", unsafe_allow_html=True)
 
-try:
-    load_api_key()                                                     # local file read only — nothing displayed
-except MissingKeyError as e:
-    st.error(str(e)); st.stop()
+SHOW_KEY = str(secret("SHOW_KEY_SETTINGS", "true")).lower() != "false"   # owner can hide the ⚙ key box from secrets
+USER_KEY.set(st.session_state.get("user_key", "") if SHOW_KEY else "")   # this session's own Gemini key (memory only), else the team key
 
 
-@st.cache_resource(show_spinner="Reading the Apollo study…")
-def study(sig):
-    return load_study(DATA)
+@st.cache_resource(show_spinner="Reading the Apollo study…", max_entries=12)
+def study(folder, sig):
+    return load_study(folder)
 
 
-S = study(signature(DATA))
+def data_dir():
+    """The shared study folder, or this session's private copy once the user has uploaded files (uploads never change others' data)."""
+    return Path(st.session_state.get("data_dir", DATA))
+
+
+S = study(str(data_dir()), signature(data_dir()))
 
 
 # ---------------- artifacts ----------------
@@ -142,7 +146,7 @@ def do_draft(status, prompt, prev):
         return f"I can't draft the full memo yet — missing: {', '.join(chk['gaps'])}. Upload the files here or add them to the data folder.", []
     steps.append(("1 Data Steward", "All required files present"))
     trace = lambda agent, msg: (steps.append((agent, msg)), status.write(f"**{agent}** — {msg}"))
-    d = D.draft(S, polish=A.polish_memo, trace=trace, brief=b, rejected=rejected, assumptions=assumptions)
+    d = D.draft(S, polish=A.polish_memo, trace=trace, brief=b, rejected=rejected, assumptions=assumptions, tag=st.session_state.chat)
     unpaid = " · ".join(f"**{X.reserve_summary(scope, x).summary['Total unpaid']} {x.lower()}**" for x in b["bases"])
     pyd = " · ".join(f"**{list(X.pyd(scope, x).summary['total'].values())[-1]} {x.lower()}**" for x in b["bases"])
     basis = next(s for s in d.sections if s["id"] == "basis")["blocks"][1:]
@@ -162,7 +166,7 @@ def do_draft(status, prompt, prev):
 def do_analyse(text, history):
     answer, results, steps, untraced, gemini = A.analyse(S, text, history)
     if not gemini and (saved := store.last_answer(text)):
-        return saved[0] + f"\n\n*Saved answer from an earlier session — {A.GEMINI['why'] or 'Gemini is unavailable'} right now.*", saved[1]
+        return saved[0] + f"\n\n*Saved answer from an earlier session — {A.gemini_state()['why'] or 'Gemini is unavailable'} right now.*", saved[1]
     if untraced: answer += f"\n\n*⚠️ The Verifier could not trace {', '.join(untraced)} to the study — treat with caution.*"
     arts = result_artifacts(results) + [dict(type="steps", items=steps)]
     return answer, arts + ([dict(type="meta", gemini=True)] if gemini else [])
@@ -172,9 +176,10 @@ def handle(prompt, files):
     global S
     cid = st.session_state.chat
     if files:
-        DATA.mkdir(parents=True, exist_ok=True)
-        for f in files: (DATA / f.name).write_bytes(f.getbuffer())
-        study.clear(); S = study(signature(DATA))
+        if data_dir() == DATA:                                        # first upload: private copy of the shared study for this session
+            mine = ROOT / "output" / "sessions" / uuid.uuid4().hex[:12]; shutil.copytree(DATA, mine); st.session_state.data_dir = str(mine)
+        for f in files: (data_dir() / Path(f.name).name).write_bytes(f.getbuffer())
+        S = study(str(data_dir()), signature(data_dir()))
         store.add(cid, "user", (prompt + "\n\n" if prompt else "") + "Uploaded: " + ", ".join(f.name for f in files))
         text, arts = readiness(); store.add(cid, "assistant", "Files received and checked.\n\n" + text, arts)
         if not prompt: return
@@ -200,7 +205,7 @@ if "chat" not in st.session_state:
     st.session_state.chat = store.new_chat(); store.add(st.session_state.chat, "assistant", *readiness())
 
 logo = base64.b64encode(LOGO.read_bytes()).decode()
-head, new, hist = st.columns([6, 1.6, 1.2], vertical_alignment="bottom")
+head, new, hist, *gear = st.columns([6, 1.6, 1.2, 0.5] if SHOW_KEY else [6, 1.6, 1.2], vertical_alignment="bottom")
 head.markdown(f'<div class="brand"><img src="data:image/png;base64,{logo}" height="34"><span class="app">Scribe · Apollo reserve study assistant</span></div>',
               unsafe_allow_html=True)
 if new.button("＋ New chat", width="stretch", type="primary"):
@@ -210,6 +215,23 @@ with hist.popover("Chats", width="stretch"):                  # always visible (
         label = f"{'▸ ' if cid == st.session_state.chat else ''}{title} · {time.strftime('%d %b %H:%M', time.localtime(created))}"
         if st.button(label, key=f"chat_{cid}", width="stretch"):
             st.session_state.chat = cid; st.rerun()
+    st.divider()
+    if export.repo_ready():
+        asked = any(m["role"] == "user" for m in store.messages(st.session_state.chat))
+        if st.button("⬆ Save this chat to the team repo", width="stretch", disabled=not asked):
+            try: st.toast(f"Saved to the repo: {export.push(st.session_state.chat).split('/')[-1]}")
+            except RuntimeError as e: st.toast(str(e))
+    else:
+        name, md_text = export.to_markdown(st.session_state.chat)
+        st.download_button("⬇ Download this chat (.md)", md_text, name, width="stretch")
+if SHOW_KEY:
+    with gear[0].popover("⚙", help="Use your own Gemini API key"):
+        k = st.text_input("Your Gemini API key (optional)", value=st.session_state.get("user_key", ""), type="password",
+                          help="Kept in memory for this browser session only — never saved or shown. Leave empty to use the team key.")
+        if k != st.session_state.get("user_key", ""): st.session_state.user_key = k.strip(); st.rerun()
+        st.caption("Using **your key**." if st.session_state.get("user_key") else "Using the **team key**." if team_key()
+                   else "No team key is configured — add yours to use the Analyst.")
+        st.caption("Free keys: aistudio.google.com/apikey")
 st.divider()
 msgs = store.messages(st.session_state.chat)
 for i, m in enumerate(msgs): render(m, i, i == len(msgs) - 1)

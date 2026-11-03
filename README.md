@@ -24,6 +24,17 @@ If Gemini is unavailable (quota or network) Scribe says so: the Analyst points y
 - Attach files with the **+** in the chat box (Apollo `.xlsx`, claims/AvE `.csv`); they are saved to `data/inputs/` and re-checked.
 - Chats are stored in `output/scribe.db`; open past chats from the **Chats** button in the header.
 
+## Share with the team (Streamlit Community Cloud, free)
+1. Push this folder to a **private** GitHub repo (`.gitignore` keeps `secrets.toml` and `output/` out).
+2. On [share.streamlit.io](https://share.streamlit.io): **Create app** → the repo, branch `main`, main file `app.py`; *Advanced settings* → Python 3.12
+   and paste your secrets (see `.streamlit/secrets.toml.example`: `GOOGLE_API_KEY`, and `GITHUB_TOKEN` / `GITHUB_REPO` for chat export).
+3. **Share** → invite teammates by email (the app stays private to invited viewers; Community Cloud allows one private app per account).
+- Teammates can paste their own Gemini key under **⚙** (kept for their browser session only); otherwise the team key is used.
+  Set `SHOW_KEY_SETTINGS = false` in secrets to hide ⚙.
+- **Chats → ⬆ Save this chat to the team repo** writes the chat to `chats/` as Markdown. Hosted chat history resets when the app restarts;
+  the exported files are the permanent reference.
+- Files a teammate uploads stay in their own session; the shared study in `data/inputs/` changes only through the repo.
+
 ## Files
 | File | Role |
 |---|---|
@@ -35,6 +46,8 @@ If Gemini is unavailable (quota or network) Scribe says so: the Analyst points y
 | `steward.py` | Data Steward (readiness check) |
 | `study.py` | Apollo parser (label + column number), shared Result format and number formatting |
 | `store.py` | SQLite chat storage |
-| `config.py` | Secrets and Gemini model selection (timeouts, no retries) |
+| `export.py` | Chat → Markdown reference, saved to the repo's `chats/` (GitHub API) or downloaded |
+| `chats/` | Exported chats (references) |
+| `config.py` | Secrets, per-session key, per-key rate limit, Gemini model selection (timeouts, no retries) |
 | `gen_synthetic.py` | Regenerates the synthetic study in `data/inputs/` and `data/golden_labels.json` |
 | `evaluate.py` | Evaluation suite: `python evaluate.py` (add `--qa` to include the Gemini Q&A set) |
