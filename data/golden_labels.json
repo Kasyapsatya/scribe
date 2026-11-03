@@ -1,0 +1,158 @@
+{
+ "ldf_codes": {
+  "AL": [
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "UNITY_TAIL",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL"
+  ],
+  "GL": [
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "MATCH_AVG:5 Pt. Wtd.",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "UNITY_TAIL",
+   "SAME_AS_PRIOR",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL"
+  ],
+  "WC": [
+   "SAME_AS_PRIOR",
+   "MANUAL",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "SAME_AS_PRIOR",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "SAME_AS_PRIOR",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL",
+   "UNITY_TAIL"
+  ]
+ },
+ "ldf_prior_outside_range": {
+  "AL": [
+   48
+  ]
+ },
+ "drivers": [
+  {
+   "sub_segment": "AL",
+   "accident_year": 2021,
+   "label": "ONE_OFF_LARGE"
+  },
+  {
+   "sub_segment": "AL",
+   "accident_year": 2023,
+   "label": "CAT"
+  },
+  {
+   "sub_segment": "GL",
+   "accident_year": 2019,
+   "label": "ONE_OFF_RELEASE"
+  },
+  {
+   "sub_segment": "WC",
+   "accident_year": 2022,
+   "label": "TREND"
+  }
+ ],
+ "diagnostics": [
+  {
+   "sub_segment": "WC",
+   "tab": "AverageCaseOS",
+   "ays": [
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022
+   ],
+   "direction": "up"
+  },
+  {
+   "sub_segment": "WC",
+   "tab": "SettlementRate",
+   "ays": [
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022
+   ],
+   "direction": "up"
+  }
+ ]
+}
