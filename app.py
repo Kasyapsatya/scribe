@@ -11,6 +11,7 @@ import specialists as X
 import steward
 import store
 import chat_sync
+from ledger import Ledger
 from config import USER_KEY, team_key, secret
 from study import DATA, load_study, seg_name, signature
 
@@ -88,10 +89,11 @@ def md(text):
     return re.sub(r"(?<!\\)\$", r"\\$", text or "")
 
 
-def render(msg, idx, last):
+def render(msg, idx, last, ledger):
     with st.chat_message(msg["role"], avatar=None if msg["role"] == "user" else AVATAR):
-        st.markdown(md(msg["content"]))
-        steps = None
+        content = ledger.render_html(msg["content"]) if msg["role"] == "assistant" else msg["content"]
+        st.markdown(md(content), unsafe_allow_html=True)
+        steps = figs = None
         for k, a in enumerate(msg["artifacts"]):
             t = a["type"]
             if t == "table":
@@ -107,6 +109,7 @@ def render(msg, idx, last):
                 else: st.caption("The Word file from this draft is no longer on the server — ask “draft the memo” to rebuild it.")
             elif t == "graph": st.graphviz_chart(a["dot"])
             elif t == "steps": steps = a
+            elif t == "figures": figs = a
             elif t == "suggestions" and last:
                 cols = st.columns(3)
                 for j, s in enumerate(a["items"]):
@@ -114,6 +117,10 @@ def render(msg, idx, last):
         if steps:
             with st.expander("How I got this", expanded=False):
                 st.markdown(md("\n".join(f"- **{a}** — {d}" for a, d in steps["items"])))
+        if figs:
+            with st.expander("Figures", expanded=False):
+                st.markdown(md("\n".join(f"- **{f['ref']}** {f['display']} — {f['source']}" + (f" ({f['derivation']})" if f["derivation"] else "")
+                                         for f in figs["items"])))
 
 
 # ---------------- handlers ----------------
@@ -165,12 +172,14 @@ def do_draft(status, prompt, prev):
                   dict(type="steps", items=steps)]
 
 
-def do_analyse(text, history):
-    answer, results, steps, untraced, gemini = A.analyse(S, text, history)
+def do_analyse(text, history, ledger):
+    answer, results, steps, issues, gemini, refs_used = A.analyse(S, text, history, ledger)
     if not gemini and (saved := store.last_answer(text)):
         return saved[0] + f"\n\n*Saved answer from an earlier session — {A.gemini_state()['why'] or 'Gemini is unavailable'} right now.*", saved[1]
-    if untraced: answer += f"\n\n*⚠️ The Verifier could not trace {', '.join(untraced)} to the study — treat with caution.*"
+    if issues: answer += f"\n\n*⚠️ The Verifier could not trace {', '.join(issues)} to the study — treat with caution.*"
+    figs = [ledger.explain(r) for r in dict.fromkeys(refs_used) if r in ledger.items]
     arts = result_artifacts(results) + [dict(type="steps", items=steps)]
+    if figs: arts.append(dict(type="figures", items=figs))
     return answer, arts + ([dict(type="meta", gemini=True)] if gemini else [])
 
 
@@ -197,8 +206,12 @@ def handle(prompt, files):
                 text, arts = do_draft(status, prompt, (last_artifact(cid, "brief") or {}).get("brief")); status.update(label="Memo drafted", state="complete", expanded=False)
         else:
             with st.spinner("Working on it…"):
-                text, arts = (readiness() if kind == "readiness" else (ABOUT, [dict(type="graph", dot=DOT)]) if kind == "about"
-                              else do_analyse(prompt, history))
+                if kind == "readiness": text, arts = readiness()
+                elif kind == "about": text, arts = ABOUT, [dict(type="graph", dot=DOT)]
+                else:
+                    ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))
+                    text, arts = do_analyse(prompt, history, ledger)
+                    arts = arts + [dict(type="ledger", json=ledger.to_json())]
     store.add(cid, "assistant", text, arts); chat_sync.save(cid)        # every chat is kept in the team repo automatically
 
 
@@ -233,7 +246,8 @@ if SHOW_KEY:
         st.caption("Free keys: aistudio.google.com/apikey")
 st.divider()
 msgs = store.messages(st.session_state.chat)
-for i, m in enumerate(msgs): render(m, i, i == len(msgs) - 1)
+chat_ledger = Ledger.from_json((last_artifact(st.session_state.chat, "ledger") or {}).get("json", ""))
+for i, m in enumerate(msgs): render(m, i, i == len(msgs) - 1, chat_ledger)
 
 entry = st.chat_input("Ask about the study, or say “draft the memo”…", accept_file="multiple", file_type=["xlsx", "csv"])
 prompt, files = (entry.text, entry.files) if entry else (st.session_state.pop("pending", None), [])

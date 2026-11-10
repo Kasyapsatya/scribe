@@ -200,7 +200,10 @@ def run(S=None, qa=False):
                 ("What is the gross total unpaid for Workers Comp?", X.reserve_summary(S, "GROSS").display().set_index("Sub-segment").loc["Workers Comp", "Total unpaid"]),
                 ("Which claim drove the AvE on Auto Liability AY 2021?", "CLM000154"),
                 ("If we used 100% incurred BF for all GL accident years, what is the total change in ultimate?", X.scenario(S, "GL", "GROSS", {"inc_bf": 1}).summary["total_change"])]
-        hits = sum(want.replace("$", "").replace("m", "") in A.analyse(S, q, [])[0].replace("$", "") for q, want in gold)
+        hits = 0
+        for q, want in gold:
+            led = Ledger(); rendered = led.render(A.analyse(S, q, [], led)[0])
+            hits += want.replace("$", "").replace("m", "") in rendered.replace("$", "")
         out.append(check("Q&A golden set (Gemini)", hits == len(gold), f"{hits}/{len(gold)}"))
         res = []
         for q, ok in BRIEF_GOLD:

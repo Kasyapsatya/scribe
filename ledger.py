@@ -51,6 +51,14 @@ class Ledger:
     def render(self, text, ctx="text"):
         return PH.sub(lambda m: fmt(self.items[m.group(1)]["value"], self.items[m.group(1)]["unit"], ctx), text)
 
+    def render_html(self, text, ctx="text"):
+        """Like render(), but each figure keeps its source as a hover title: <span title="...">value</span>."""
+        import html as _html
+        def repl(m):
+            it = self.items[m.group(1)]
+            return f'<span title="{_html.escape(it["source"], quote=True)}">{fmt(it["value"], it["unit"], ctx)}</span>'
+        return PH.sub(repl, text)
+
     def tag(self, value, unit, source):
         """'<table-style display> [Fxxxx]' for a tool result shown to an LLM; no ref for a missing value."""
         if value is None or (isinstance(value, float) and pd.isna(value)): return fmt(value, unit, "table")
