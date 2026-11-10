@@ -9,6 +9,7 @@ import drafting as D
 import agents as A
 import brief as B
 import steward
+import memo as M
 import tools as T
 from ledger import Ledger, CalcError, untraced
 
@@ -194,6 +195,25 @@ def run(S=None, qa=False):
     want = [("diagnostic", "WC", dict(tab="AverageCaseOS")), ("ldf", "WC", dict(age=24)), ("ldf", "AL", dict(age=48)), ("ave", "AL", dict(accident_year="2021"))]
     found = [any(i["category"] == cat and i["sub_segment"] == seg and all(i.get(k) == v for k, v in extra.items()) for i in items) for cat, seg, extra in want]
     out.append(check("scan_study surfaces the planted review items (WC case OS shift, WC/AL LDFs, AL 2021 AvE)", all(found), str(found)))
+    # 15 memo state: draft shares the chat ledger; read/search; fill_input inserts a verbatim 'u' block; docx rebuilds
+    led4 = Ledger(); d4 = D.draft(S, ledger=led4)
+    ms = M.from_draft(d4, B.DEFAULT, "test subject")
+    sec, hits, before = M.read_section(ms, "summary"), M.search(ms, "IBNR"), M.open_inputs(ms)
+    filled = M.fill(ms, before[0]["item_id"], "2024-12-31")
+    after = M.open_inputs(ms)
+    filled_section = next(s for s in ms.sections if s["id"] == filled["section_id"])
+    M.rebuild_docx(ms)
+    out.append(check("Memo state: draft shares the chat ledger; read_section/search work; fill_input inserts a verbatim 'u' block; docx rebuilds",
+                     ms.ledger is led4 and sec["id"] == "summary" and bool(hits) and len(before) > 0 and len(after) == len(before) - 1
+                     and any(b == ("u", "Analyst input", f"{filled['what']}: 2024-12-31") for b in filled_section["blocks"]) and Path(ms.docx).exists()))
+    # 16 replace_section replaces narrative text only; tables and 'u' blocks are untouched
+    before_sec = next(s for s in ms.sections if s["id"] == "pyd"); tables0, u0 = [b for b in before_sec["blocks"] if b[0] == "table"], [b for b in before_sec["blocks"] if b[0] == "u"]
+    texts = M.read_section(ms, "pyd")["texts"]
+    M.replace_section(ms, "pyd", [t.upper() for t in texts])
+    after_sec = next(s for s in ms.sections if s["id"] == "pyd")
+    out.append(check("replace_section replaces only p/b/h3 text, in order; tables and 'u' blocks are kept",
+                     [b for b in after_sec["blocks"] if b[0] == "table"] == tables0 and [b for b in after_sec["blocks"] if b[0] == "u"] == u0
+                     and [b[1] for b in after_sec["blocks"] if b[0] in ("p", "b", "h3")] == [t.upper() for t in texts]))
     # 8 Q&A golden set (Gemini)
     if qa:
         gold = [("What is the total net PYD for General Liability?", X.pyd(S, "NET", "GL").summary["total"]["General Liability"]),

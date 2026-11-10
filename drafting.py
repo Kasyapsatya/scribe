@@ -408,9 +408,11 @@ class Draft:
     flags: int
 
 
-def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=(), assumptions=(), tag=""):
-    """Drafting team: build to the brief → verify → (optional LLM polish, verifier-gated) → assemble."""
-    t0 = time.time(); OUT.mkdir(exist_ok=True); C = Citations(); b = brief or B.DEFAULT
+def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=(), assumptions=(), tag="", ledger=None):
+    """Drafting team: build to the brief → verify → (optional LLM polish, verifier-gated) → assemble.
+    ledger: this chat's shared Ledger (PLAN_v3 §2) to cite into, so memo and chat answers trace to the same refs;
+    a fresh one is used when not given (e.g. the offline evaluation suite)."""
+    t0 = time.time(); OUT.mkdir(exist_ok=True); C = ledger if ledger is not None else Citations(); b = brief or B.DEFAULT
     if b["segments"]: S = S.only(b["segments"])
     trace("2 Drafting team", "Building memo sections from the Apollo exhibits")
     secs = [basis_section(S, C, b, rejected, assumptions), summary_section(S, C, b["bases"]), pyd_section(S, C, trace, b)]

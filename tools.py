@@ -1,8 +1,9 @@
-"""Tool closures the agents call (PLAN_v3 §4): study and evidence tools (memo tools follow in memo.py, phase 4).
-build_tools(S, ledger, turn, allow) returns only the closures named in `allow`, so e.g. the Analyst never sees
-claim_movements (Claims Investigator only). Every call tags its numbers with the ledger and logs a step for the
-"How I got this" panel. turn = {"results": [...], "steps": [...]}, appended to as tools run."""
+"""Tool closures the agents call (PLAN_v3 §4): study, evidence and memo tools. build_tools(S, ledger, turn, allow,
+memo=None) returns only the closures named in `allow`, so e.g. the Analyst never sees claim_movements (Claims
+Investigator only). Every call tags its numbers with the ledger and logs a step for the "How I got this" panel.
+turn = {"results": [...], "steps": [...]}, appended to as tools run."""
 import json, re
+import memo as M
 import specialists as X
 from ledger import CalcError
 from study import fmt
@@ -11,9 +12,10 @@ STUDY_TOOLS = ["find_sections", "reserve_summary", "prior_year_development", "re
                "method_weights", "method_indications", "what_if_weights", "sensitivity_range", "diagnostic",
                "actual_vs_expected", "read_exhibit"]
 EVIDENCE_TOOLS = ["calculate", "explain_figure"]
+MEMO_TOOLS = ["read_memo_section", "search_memo"]
 
 
-def build_tools(S, ledger, turn, allow):
+def build_tools(S, ledger, turn, allow, memo=None):
     def run(agent, desc, job):
         """Run one specialist; any error (bad argument, missing tab) goes back to the model as text instead of crashing the turn."""
         try:
@@ -121,6 +123,23 @@ def build_tools(S, ledger, turn, allow):
         except KeyError as e:
             return f"ERROR: {e}"
 
+    def read_memo_section(section_id: str) -> str:
+        """Read one memo section's current text (with {{Fxxxx}} placeholders intact) for "why does the memo say…"
+        questions. section_id is one of drafting.ORDER; use search_memo first if you don't know which one."""
+        if memo is None: return "ERROR: no memo has been drafted in this chat yet"
+        try:
+            turn["steps"].append(("Drafting team", f"Read memo section '{section_id}' — requested by Gemini"))
+            return json.dumps(M.read_section(memo, section_id))
+        except KeyError as e:
+            return f"ERROR: {e}"
+
+    def search_memo(text: str) -> str:
+        """Find which memo sections mention a topic, to answer "why does the memo say X" or "where does the
+        memo cover Y" questions."""
+        if memo is None: return "ERROR: no memo has been drafted in this chat yet"
+        turn["steps"].append(("Drafting team", f"Searched the memo for “{text}” — requested by Gemini"))
+        return json.dumps(M.search(memo, text))
+
     def scan_study() -> str:
         """First Look: deterministic review candidates — largest PYD AYs, judgmental/outside-range LDFs, diagnostic
         calendar-year shifts, largest |A−E| with its driver label, widest method spread — each with its reference."""
@@ -135,7 +154,8 @@ def build_tools(S, ledger, turn, allow):
                  reinsurance_ratios=reinsurance_ratios, ldf_selection=ldf_selection, method_weights=method_weights,
                  method_indications=method_indications, what_if_weights=what_if_weights, sensitivity_range=sensitivity_range,
                  diagnostic=diagnostic, actual_vs_expected=actual_vs_expected, claim_movements=claim_movements,
-                 read_exhibit=read_exhibit, calculate=calculate, explain_figure=explain_figure, scan_study=scan_study)
+                 read_exhibit=read_exhibit, calculate=calculate, explain_figure=explain_figure, scan_study=scan_study,
+                 read_memo_section=read_memo_section, search_memo=search_memo)
     missing = [a for a in allow if a not in tools]
     if missing: raise KeyError(f"tools.build_tools: not implemented yet: {missing}")
     return [tools[a] for a in allow]

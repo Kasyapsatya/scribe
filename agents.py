@@ -104,8 +104,8 @@ def _ask_claims_investigator(S, ledger, turn):
     return ask_claims_investigator
 
 
-def analyst_tools(S, ledger, turn):
-    return T.build_tools(S, ledger, turn, T.STUDY_TOOLS + T.EVIDENCE_TOOLS) + [_ask_claims_investigator(S, ledger, turn)]
+def analyst_tools(S, ledger, turn, memo=None):
+    return T.build_tools(S, ledger, turn, T.STUDY_TOOLS + T.EVIDENCE_TOOLS + T.MEMO_TOOLS, memo) + [_ask_claims_investigator(S, ledger, turn)]
 
 
 ANALYST_RULES = """You are Scribe's Analyst for an Apollo reserve study: {lob} sub-segments {segments}; bases GROSS and NET;
@@ -114,6 +114,8 @@ evaluation {evaluation}. Use the sub-segment codes in tool calls.
 - Every number you write — amount, ratio, factor — must be a {{Fxxxx}} placeholder copied from a tool result. Never type a
   digit yourself; use calculate for any arithmetic (shares, differences, sums) — it returns a new {{Fxxxx}} for the result.
 - For claim-level "why" questions (what drove an AY's movement), call ask_claims_investigator — never interpret claims yourself.
+- For "why does the memo say X" or "where does the memo cover Y", use search_memo then read_memo_section — these work only
+  once a memo has been drafted in this chat; say so if they return an error.
 - Name the Apollo tab (and column number where given) behind each key figure.
 - Tables and charts from your tool calls are shown automatically under your answer — refer to them, do not reproduce whole tables.
 - "BF" without paid/incurred: assume Incurred BF and say so in one line. If a what-if lacks weights or AYs, assume all AYs and 100% to the
@@ -130,16 +132,16 @@ def headline(res):
     return f"- **{res.title}** — " + ("; ".join(items) if items else "see table")
 
 
-def analyse(S, text, history, ledger):
-    """Analyst turn. Gemini plans which tools (incl. the Claims Investigator) to call; Python runs them and the
-    ref verifier checks every figure against the ledger, with one retry if it finds untraced numbers.
-    Returns (answer — raw {{Fxxxx}} text, results, steps, untraced issues, by_gemini, refs used)."""
+def analyse(S, text, history, ledger, memo=None):
+    """Analyst turn. Gemini plans which tools (incl. the Claims Investigator and, once a memo exists, the memo
+    tools) to call; Python runs them and the ref verifier checks every figure against the ledger, with one retry
+    if it finds untraced numbers. Returns (answer — raw {{Fxxxx}} text, results, steps, untraced issues, by_gemini, refs used)."""
     turn = dict(results=[], steps=[("Orchestrator", "Routed to the Analyst")])
     if gemini_model():
         try:
             ctx = "\n".join(f"{r}: {m[:600]}" for r, m in history[-6:])
             agent = _agent(ANALYST_RULES.format(lob=S.lob, segments=", ".join(f"{s} ({seg_name(s)})" for s in S.segments), evaluation=S.evaluation),
-                           analyst_tools(S, ledger, turn))
+                           analyst_tools(S, ledger, turn, memo))
             prompt = (f"Conversation so far:\n{ctx}\n\n" if ctx else "") + f"User question: {text}"
             answer = _run(agent, prompt)
             issues = untraced(answer, ledger)

@@ -7,6 +7,7 @@ import streamlit as st
 import agents as A
 import brief as B
 import drafting as D
+import memo
 import specialists as X
 import steward
 import store
@@ -155,7 +156,9 @@ def do_draft(status, prompt, prev):
         return f"I can't draft the full memo yet — missing: {', '.join(chk['gaps'])}. Upload the files here or add them to the data folder.", []
     steps.append(("1 Data Steward", "All required files present"))
     trace = lambda agent, msg: (steps.append((agent, msg)), status.write(f"**{agent}** — {msg}"))
-    d = D.draft(S, polish=A.polish_memo, trace=trace, brief=b, rejected=rejected, assumptions=assumptions, tag=st.session_state.chat)
+    cid = st.session_state.chat
+    ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))     # shared with this chat's Q&A (§2)
+    d = D.draft(S, polish=A.polish_memo, trace=trace, brief=b, rejected=rejected, assumptions=assumptions, tag=cid, ledger=ledger)
     unpaid = " · ".join(f"**{X.reserve_summary(scope, x).summary['Total unpaid']} {x.lower()}**" for x in b["bases"])
     pyd = " · ".join(f"**{list(X.pyd(scope, x).summary['total'].values())[-1]} {x.lower()}**" for x in b["bases"])
     basis = next(s for s in d.sections if s["id"] == "basis")["blocks"][1:]
@@ -168,12 +171,14 @@ def do_draft(status, prompt, prev):
             f"**Drafting basis** (also at the top of the memo):\n{brief_lines}\n\n"
             "Open the preview below or download the Word memo. Red text marks what the data cannot support. "
             "To change a choice, just say so — e.g. “redraft with high = Paid BF”." + note)
+    subject = f"DVR — {S.lob} ({', '.join(seg_name(s) for s in scope.segments)}) — {S.evaluation}"
+    memo_state = memo.from_draft(d, b, subject)
     return text, [dict(type="memo", html=D.to_html(d.sections, d.citations)), dict(type="file", path=str(d.docx)), dict(type="brief", brief=b),
-                  dict(type="steps", items=steps)]
+                  dict(type="ledger", json=ledger.to_json()), dict(type="memo_state", json=memo.to_json(memo_state)), dict(type="steps", items=steps)]
 
 
-def do_analyse(text, history, ledger):
-    answer, results, steps, issues, gemini, refs_used = A.analyse(S, text, history, ledger)
+def do_analyse(text, history, ledger, memo_state):
+    answer, results, steps, issues, gemini, refs_used = A.analyse(S, text, history, ledger, memo_state)
     if not gemini and (saved := store.last_answer(text)):
         return saved[0] + f"\n\n*Saved answer from an earlier session — {A.gemini_state()['why'] or 'Gemini is unavailable'} right now.*", saved[1]
     if issues: answer += f"\n\n*⚠️ The Verifier could not trace {', '.join(issues)} to the study — treat with caution.*"
@@ -210,7 +215,9 @@ def handle(prompt, files):
                 elif kind == "about": text, arts = ABOUT, [dict(type="graph", dot=DOT)]
                 else:
                     ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))
-                    text, arts = do_analyse(prompt, history, ledger)
+                    ms_art = last_artifact(cid, "memo_state")
+                    memo_state = memo.from_json(ms_art["json"], ledger) if ms_art else None
+                    text, arts = do_analyse(prompt, history, ledger, memo_state)
                     arts = arts + [dict(type="ledger", json=ledger.to_json())]
     store.add(cid, "assistant", text, arts); chat_sync.save(cid)        # every chat is kept in the team repo automatically
 
