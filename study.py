@@ -214,7 +214,12 @@ class Result:
     def table_note(self):
         return " ".join(x for x in [self.note, "All amounts in tables are in $m." if "mm" in self.units.values() else ""] if x)
 
-    def to_llm(self, max_rows=40):
+    def to_llm(self, ledger=None, max_rows=40):
+        """JSON for an LLM tool result. Without a ledger: display values only (unchanged from v2). With one: every
+        numeric cell/summary figure carries its reference, e.g. "-1.46 [F0031]" (ledger.Ledger.register_result)."""
         files = sorted({s.split("!")[0] for s in self.sources.values() if " | " in s and "!" in s})      # "file | Tab" per source
-        return dict(title=self.title, note=self.table_note, summary=self.summary,
-                    table=self.display().head(max_rows).to_dict(orient="records"), sources=files[:8])
+        if ledger is None:
+            return dict(title=self.title, note=self.table_note, summary=self.summary,
+                        table=self.display().head(max_rows).to_dict(orient="records"), sources=files[:8])
+        table, summary = ledger.register_result(self, max_rows)
+        return dict(title=self.title, note=self.table_note, summary=summary, table=table, sources=files[:8])

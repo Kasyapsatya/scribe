@@ -8,35 +8,16 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor
 from study import seg_name, fmt
+from ledger import Ledger as Citations, PH
 import specialists as X
 import brief as B
 
 TEMPLATE = Path(__file__).parent / "data" / "DVR Memo Template version 1.docx"
 OUT = Path(__file__).parent / "output"
 IR = lambda what: f"[INPUT REQUIRED: {what}]"
-PH = re.compile(r"\{\{(F\d{4})\}\}")
 NOTE_MM = "All amounts in tables are in $m."
 direction = lambda v: "adverse" if v >= 5e3 else "favorable" if v <= -5e3 else "no material"     # |PYD| < $0.005m reads as nil
 lc = lambda label: label[0].lower() + label[1:]                                                  # "Average case OS" → "average case OS"
-
-
-class Citations:
-    """Registry of every number placed in the memo: id → value, unit, source."""
-    def __init__(self): self.items, self._key = {}, {}
-
-    def cite(self, value, unit, source):
-        k = (source, unit, round(float(value), 6))
-        if k not in self._key:
-            self._key[k] = f"F{len(self.items) + 1:04d}"; self.items[self._key[k]] = dict(value=float(value), unit=unit, source=source)
-        return "{{" + self._key[k] + "}}"
-
-    def from_result(self, res, row, col):
-        """Placeholder for one cell of a specialist Result (row = value in its first column)."""
-        r = res.df[res.df.iloc[:, 0].astype(str) == str(row)].iloc[0]
-        return self.cite(r[col], res.units[col], res.sources.get((row, col)) or res.sources.get((str(row), col)) or res.title)
-
-    def render(self, text, ctx="text"):
-        return PH.sub(lambda m: fmt(self.items[m.group(1)]["value"], self.items[m.group(1)]["unit"], ctx), text)
 
 
 def table_block(C, res, rows=None, cols=None):
