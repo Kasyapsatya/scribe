@@ -333,6 +333,65 @@ def ave(S, seg, basis="GROSS"):
                   chart=f, note=f"Incurred emergence since the prior review ({period}). A − E positive = adverse.")
 
 
+def claim_movements(S, seg, ay, basis="GROSS", n=10):
+    """Claims Investigator only: claim-level rows behind an AY's AvE — ClaimID, prior/current/change incurred, CAT
+    flag, loss description, each claim's share of the AY's A−E — plus the rule-based driver label (see investigate())."""
+    f = 1.0 if basis == "GROSS" else (S.cell(seg, "NET", "Indications", str(ay), col_no=10)[0] /
+                                       S.cell(seg, "GROSS", "Indications", str(ay), col_no=10)[0])
+    c = S.claims[(S.claims.sub_segment == seg) & (S.claims.accident_year == int(ay))].copy()
+    if c.empty: raise KeyError(f"no claims for {seg} AY{ay}")
+    a = S.ave[(S.ave.sub_segment == seg) & (S.ave.basis == "GROSS") & (S.ave.accident_year == int(ay))]
+    ae = float(a.actual_incurred.iloc[0] - a.expected_incurred.iloc[0]) if len(a) else c.Incurred_change.sum()
+    c["abs"] = c.Incurred_change.abs(); top = c.nlargest(n, "abs")
+    df = pd.DataFrame({"Claim": top.ClaimID, "Prior incurred": top.Incurred_prior * f, "Current incurred": top.Incurred_current * f,
+                       "Incurred movement": top.Incurred_change * f, "CAT": top.CAT_Flag.map({1: "Yes", 0: "No"}),
+                       "Description": top.Loss_Description, "Share of A − E": (top.Incurred_change / ae) if ae else 0.0})
+    src = {(r.ClaimID, col): f"claims file | {r.ClaimID} {col}" for r in top.itertuples() for col in ("Prior incurred", "Current incurred", "Incurred movement")}
+    rule = investigate(S, seg, ay, basis).summary["label"]
+    return Result(f"{seg_name(seg)} AY {ay} — claim movements ({basis.lower()})", df.reset_index(drop=True),
+                  {"Prior incurred": "mm", "Current incurred": "mm", "Incurred movement": "mm", "Share of A − E": "pct"}, src,
+                  summary=dict(rule_label=rule, claims_in_ay=len(c), a_minus_e=fmt(ae * f, "mm", "text")),
+                  note="Claim file is gross" + ("." if basis == "GROSS" else f"; net shown at {fmt(f, 'pct')} of gross (net ÷ gross incurred, Indications col 10)."))
+
+
+def scan_study(S, ledger, basis="GROSS"):
+    """First Look candidates (deterministic): largest PYD AYs, judgmental/outside-range LDFs, diagnostic
+    calendar-year shifts, largest |A−E| with its driver label, widest method spread — each line carries its ref."""
+    items = []
+    for seg in S.segments:
+        name = seg_name(seg)
+        if S.has(seg, basis, "Comparison_With_Prior"):
+            P = pyd(S, basis, seg); body = P.df[P.df["Accident year"] != "Total"]
+            col = name if name in body.columns else body.columns[-1]
+            for _, r in body.reindex(body[col].abs().sort_values(ascending=False).index).head(2).iterrows():
+                tag = ledger.tag(r[col], "mm", P.sources.get((r["Accident year"], col), P.title))
+                items.append(dict(category="pyd", sub_segment=seg, accident_year=r["Accident year"], text=f"{name} AY {r['Accident year']}: PYD {tag}"))
+        for tri in ("IncLossLegalTri", "PaidLossLegalTri"):
+            if not S.has(seg, basis, tri): continue
+            L = ldf(S, seg, basis, tri)
+            flagged = L.df[L.df.Basis.str.startswith("Judgmental") | L.df["Age (months)"].isin(L.summary["retained_but_prior_outside_recent_averages"])]
+            for _, r in flagged.iterrows():
+                age = int(r["Age (months)"]); tag = ledger.tag(r["Selected"], "factor", L.sources.get((age, "Selected"), L.title))
+                items.append(dict(category="ldf", sub_segment=seg, age=age, text=f"{name} {tri}: {r.Basis.lower()} at {age} months ({tag})"))
+        for tab in DIAG:
+            if not S.has(seg, basis, tab): continue
+            Dg = diagnostic(S, seg, basis, tab)
+            if Dg.summary["calendar_year_shift"]:
+                items.append(dict(category="diagnostic", sub_segment=seg, tab=tab,
+                                  text=f"{name} {DIAG[tab][0]}: calendar-year shift {Dg.summary['calendar_year_shift']} on the latest diagonal"))
+        if S.ave is not None and (S.ave.sub_segment == seg).any():
+            A = ave(S, seg, basis); body = A.df[A.df["Accident year"] != "Total"]
+            for _, r in body.reindex(body["A − E"].abs().sort_values(ascending=False).index).head(3).iterrows():
+                ay, driver = r["Accident year"], (investigate(S, seg, int(r["Accident year"]), basis).summary["label"] if S.claims is not None else None)
+                tag = ledger.tag(r["A − E"], "mm", A.sources.get((ay, "A − E"), A.title))
+                items.append(dict(category="ave", sub_segment=seg, accident_year=ay, text=f"{name} AY {ay}: A − E {tag}" + (f" ({driver})" if driver else "")))
+        M = method_indications(S, seg, basis)
+        for _, r in M.df.nlargest(2, "Spread / selected").iterrows():
+            tag = ledger.tag(r["Spread / selected"], "pct", M.sources.get((r["Accident year"], "Spread / selected"), M.title))
+            items.append(dict(category="spread", sub_segment=seg, accident_year=r["Accident year"], text=f"{name} AY {r['Accident year']}: method spread {tag} of selected"))
+    return items
+
+
 DRIVER_TEXT = {"ONE_OFF_LARGE": "a single large claim — a one-off, not an emerging trend",
                "ONE_OFF_RELEASE": "a case reserve release on a single claim settled below its reserve — not indicative of a trend",
                "CAT": "a catastrophe-coded claim — excluded from the attritional trend assessment",

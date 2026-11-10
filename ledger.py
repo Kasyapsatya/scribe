@@ -119,3 +119,17 @@ class Ledger:
         led = cls(); led.items = json.loads(s) if s else {}
         for ref, it in led.items.items(): led._key[(it["source"], it["unit"], round(float(it["value"]), 6))] = ref
         return led
+
+
+# ---------------- ref verifier (§2): every {{Fxxxx}} must be a known ref; every other number must be exempt ----------------
+ALLOWED = [r"\{\{F\d{4}\}\}", r"\b(19|20)\d{2}(Q[1-4])?\b", r"\b\d{1,3}(–\d{1,3})? months\b", r"(?i)\bExhibits? \d+\b", r"(?i)\bcols? \d+\b",
+           r"\bCLM\d+\b", r"(?i)\b\d+ Pt\.", r"\b3/5/7-point\b", r"\b12-to-ultimate\b", r"\(\d+\)", r"^\s*\d{1,3}\s*$", r"\b\d{4}–\d{4}\b"]
+
+
+def untraced(text, ledger):
+    """Years, ages, claim IDs, column/exhibit numbers and small counts are exempt; everything else must be a
+    {{Fxxxx}} placeholder resolving to a ref in this ledger. Same rule for memo text and chat answers."""
+    t = text
+    issues = [f"unknown fact {m}" for m in PH.findall(t) if m not in ledger.items]
+    for pat in ALLOWED: t = re.sub(pat, "", t)
+    return issues + [f"untraced number '{n}'" for n in re.findall(r"\d[\d,.]*", t)]

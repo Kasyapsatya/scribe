@@ -1,5 +1,5 @@
 """Evaluation suite (CLAUDE.md §8). Offline checks run without Gemini; the Q&A golden set needs Gemini.  Run: python evaluate.py"""
-import json, shutil, tempfile
+import json, re, shutil, tempfile
 from pathlib import Path
 from docx import Document
 from openpyxl import load_workbook
@@ -9,6 +9,8 @@ import drafting as D
 import agents as A
 import brief as B
 import steward
+import tools as T
+from ledger import Ledger, CalcError, untraced
 
 GOLDEN = json.loads((DATA.parent / "golden_labels.json").read_text())
 ROUTES = [("What data is available?", "readiness"), ("Is anything missing?", "readiness"), ("Draft the DVR memo", "draft"),
@@ -151,6 +153,47 @@ def run(S=None, qa=False):
     got = {p.text.strip() for p in Document(d.docx).paragraphs}
     miss = [h for h in heads if h not in got]
     out.append(check("Memo covers every template section", not miss, ", ".join(miss) or f"{len(heads)}/{len(heads)}"))
+    # 9 ledger: dedupe by source, calculate arithmetic, rejects unsafe/unknown expressions, derivation chain
+    Lchk = Ledger()
+    r1 = Lchk.cite(1.0, "mm", "src a"); r2 = Lchk.cite(1.0, "mm", "src a"); r3 = Lchk.cite(1.0, "mm", "src b")
+    ref_a, val_a = Lchk.calculate("F0001 * 3 - F0001", "mm", "check")
+    rejected = []
+    for bad in ("__import__('os')", "F0001.value", "F9999", "F0001[0]"):
+        try: Lchk.calculate(bad, "mm", "bad"); rejected.append(False)
+        except CalcError: rejected.append(True)
+    out.append(check("Ledger: dedupe by (source, unit, value); calculate arithmetic; rejects unsafe/unknown expressions",
+                     r1 == r2 and r1 != r3 and abs(val_a - 2.0) < 1e-9 and all(rejected) and Lchk.explain(ref_a)["derivation"] == "F0001 * 3 - F0001",
+                     f"dedupe={r1 == r2}, calc={val_a}, rejected={rejected}"))
+    # 10 to_llm(ledger): every numeric table cell's ref resolves to the same value
+    L2 = Ledger(); res = X.reserve_summary(S, "GROSS"); payload = res.to_llm(L2)
+    ok_cells = all(abs(L2.items[m.group(1)]["value"] - row[c]) < max(1.0, abs(row[c])) * 1e-6
+                   for row, disp_row in zip(res.df.to_dict(orient="records"), payload["table"])
+                   for c, v in disp_row.items() if isinstance(v, str) and (m := re.search(r"\[(F\d{4})\]", v)))
+    out.append(check("to_llm(ledger): every numeric cell's ref resolves to the same value", ok_cells))
+    # 11 ref verifier: placeholders + exempt tokens pass; a bare number is flagged
+    refs = list(L2.items)[:2]
+    good = f"The unpaid estimate is {{{{{refs[0]}}}}}, up from {{{{{refs[1]}}}}} in 2021 at age 24 months (CLM000154, col 3)."
+    bad = f"The unpaid estimate is $1.46m, up from {{{{{refs[1]}}}}}."
+    out.append(check("Ref verifier: placeholders + exempt tokens pass, a bare number is flagged",
+                     not untraced(good, L2) and any("1.46" in u for u in untraced(bad, L2))))
+    # 12 scripted-model wiring test (no Gemini): tool dispatch, allow-lists, placeholder rendering
+    L3 = Ledger(); turn3 = dict(results=[], steps=[])
+    fns = {f.__name__: f for f in T.build_tools(S, L3, turn3, T.STUDY_TOOLS + T.EVIDENCE_TOOLS)}       # Analyst's set
+    pyd_json = json.loads(fns["prior_year_development"]("GROSS", "GL"))
+    tagged = next(v for row in pyd_json["table"] for v in row.values() if isinstance(v, str) and "[F" in v)
+    ref_id = tagged.split("[")[1].rstrip("]")
+    canned = f"GL's prior year development is {{{{{ref_id}}}}}."
+    out.append(check("Scripted-model wiring: Analyst tool set excludes claim_movements; a placeholder answer dispatches, verifies and renders",
+                     "claim_movements" not in fns and not untraced(canned, L3) and "{{" not in L3.render(canned) and len(turn3["steps"]) >= 1))
+    # 13 claim_movements: loss descriptions + the planted top claims
+    cm_al, cm_gl = X.claim_movements(S, "AL", 2021, "GROSS"), X.claim_movements(S, "GL", 2019, "GROSS")
+    out.append(check("claim_movements returns loss descriptions and the planted top claims (AL 2021 CLM000154, GL 2019 CLM000302)",
+                     "Description" in cm_al.df.columns and cm_al.df.iloc[0].Claim == "CLM000154" and cm_gl.df.iloc[0].Claim == "CLM000302"))
+    # 14 scan_study: surfaces the planted review items
+    items = X.scan_study(S, Ledger())
+    want = [("diagnostic", "WC", dict(tab="AverageCaseOS")), ("ldf", "WC", dict(age=24)), ("ldf", "AL", dict(age=48)), ("ave", "AL", dict(accident_year="2021"))]
+    found = [any(i["category"] == cat and i["sub_segment"] == seg and all(i.get(k) == v for k, v in extra.items()) for i in items) for cat, seg, extra in want]
+    out.append(check("scan_study surfaces the planted review items (WC case OS shift, WC/AL LDFs, AL 2021 AvE)", all(found), str(found)))
     # 8 Q&A golden set (Gemini)
     if qa:
         gold = [("What is the total net PYD for General Liability?", X.pyd(S, "NET", "GL").summary["total"]["General Liability"]),

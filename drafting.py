@@ -8,7 +8,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor
 from study import seg_name, fmt
-from ledger import Ledger as Citations, PH
+from ledger import Ledger as Citations, PH, untraced
 import specialists as X
 import brief as B
 
@@ -314,17 +314,6 @@ def closing_sections(files):
 
 
 # ---------------- verifier ----------------
-ALLOWED = [r"\{\{F\d{4}\}\}", r"\b(19|20)\d{2}(Q[1-4])?\b", r"\b\d{1,3}(–\d{1,3})? months\b", r"(?i)\bExhibits? \d+\b", r"(?i)\bcols? \d+\b",
-           r"\bCLM\d+\b", r"(?i)\b\d+ Pt\.", r"\b3/5/7-point\b", r"\b12-to-ultimate\b", r"\(\d+\)", r"^\s*\d{1,3}\s*$", r"\b\d{4}–\d{4}\b"]
-
-
-def untraced(text, C):
-    t = text
-    issues = [f"unknown fact {m}" for m in PH.findall(t) if m not in C.items]
-    for pat in ALLOWED: t = re.sub(pat, "", t)
-    return issues + [f"untraced number '{n}'" for n in re.findall(r"\d[\d,.]*", t)]
-
-
 def verify(section, C):
     out = []
     for b in section["blocks"]:
