@@ -28,20 +28,20 @@ def suggestions(S):
             f"Show the average case OS diagnostic for {c}"]
 ABOUT = """**How I work** — a team of agents over your Apollo study:
 
-- **Orchestrator** routes each request: readiness, drafting or analysis.
+- **Orchestrator** reads each message in one call: what you want (draft, a question, a data check...), its scope, and
+  any drafting instructions — checked against the study and your own words before anything happens.
 - **Data Steward** checks every file before work starts.
-- **Brief agent** reads any drafting instructions you give (sensitivity scenarios, scope, materiality, your own text for a section) and checks them against the study; the memo says what it applied, what it defaulted and what it could not do.
 - **Drafting team** builds each memo section from defined Apollo columns, then the **Verifier** ties every figure to its source cell and the **Assembler** writes the Word memo.
-- **Analyst** answers questions using specialist agents: **Study Navigator**, **Exhibit reader**, **LDF Explainer**, **Diagnostics**, **Scenario** (re-weights Apollo's own method indications) and **Claims Investigator**.
+- **Analyst** answers questions using specialist tools: Study Navigator, Exhibit reader, LDF Explainer, Diagnostics, Scenario (re-weights Apollo's own method indications), and the **Claims Investigator** sub-agent, which reads claim-level descriptions for "why" questions.
 
-I never generate numbers: every figure comes from the study and is verified before you see it."""
+Every figure — in chat or in the memo — is a reference back to its source cell, never a number I wrote myself; the collapsed **Figures** panel under an answer shows where each one came from."""
 DOT = """digraph{rankdir=LR;bgcolor="transparent";node[shape=box,style="rounded,filled",fillcolor="#F6F3FA",color="#A100FF",fontname=Arial,fontsize=10];
-U[label="You",shape=oval,fillcolor="#FFFFFF"];O[label="Orchestrator",fillcolor="#E9D7FF"];DS[label="Data Steward"];
-subgraph cluster_d{label="Drafting";color="#CCCCCC";BA[label="Brief agent (Gemini)"];DT[label="Drafting team"];V1[label="Verifier"];AS[label="Assembler → .docx"]}
+U[label="You",shape=oval,fillcolor="#FFFFFF"];O[label="Orchestrator (Gemini)",fillcolor="#E9D7FF"];DS[label="Data Steward"];
+subgraph cluster_d{label="Drafting";color="#CCCCCC";DT[label="Drafting team"];V1[label="Verifier"];AS[label="Assembler → .docx"]}
 subgraph cluster_a{label="Analysis";color="#CCCCCC";AN[label="Analyst (Gemini)"];N[label="Study Navigator"];E[label="Exhibit reader"];L[label="LDF Explainer"];
-DG[label="Diagnostics"];SC[label="Scenario"];CI[label="Claims Investigator"];V2[label="Verifier"]}
-F[label="Apollo packs · claims · AvE",shape=cylinder,fillcolor="#FFFFFF"];
-U->O;O->DS;O->BA->DT->V1->AS;O->AN;AN->{N E L DG SC CI};AN->V2;{DS N E L DG SC CI DT}->F[style=dotted,arrowhead=none]}"""
+DG[label="Diagnostics"];SC[label="Scenario"];CI[label="Claims Investigator (Gemini)"];V2[label="Ref verifier"]}
+F[label="Apollo packs · claims · AvE",shape=cylinder,fillcolor="#FFFFFF"];LG[label="Evidence ledger",shape=cylinder,fillcolor="#FFFFFF"];
+U->O;O->DS;O->DT->V1->AS;O->AN;AN->{N E L DG SC};AN->CI;AN->V2;{DS N E L DG SC CI DT}->F[style=dotted,arrowhead=none];{DT AN V1 V2}->LG[style=dotted,arrowhead=none]}"""
 
 st.set_page_config(page_title="Scribe | Accenture", page_icon=AVATAR, layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -138,26 +138,22 @@ def last_artifact(cid, kind):
     return None
 
 
-def do_draft(status, prompt, prev):
-    """Brief agent (only if the request carries instructions) → Data Steward → Drafting team. prev = this chat's current brief."""
-    b, rejected, assumptions, note = prev or B.DEFAULT, [], [], ""
-    steps = [("0 Orchestrator", "Routed to the Drafting team")]
-    if B.needs_reading(prompt, S):
-        try:
-            b, rejected, assumptions, question = A.read_brief(S, prompt, b)
-            steps.append(("1 Brief agent", "Gemini read your drafting instructions; Python checked every choice against the study and your words"))
-            if question: return question, [dict(type="pending_draft", text=prompt), dict(type="steps", items=steps)]
-        except RuntimeError as e:
-            note = f"\n\n*{e} — I could not read your drafting instructions, so this draft uses {'this chat’s previous brief' if prev else 'the defaults'}.*"
-            steps.append(("1 Brief agent", f"Skipped: {e}"))
+def do_draft(status, prompt, prev, ledger, brief_changes, note=""):
+    """Data Steward → Drafting team. prev = this chat's current brief; brief_changes = the Orchestrator's reading of
+    this instruction (one Gemini call, already made by the time this runs) — Python checks every choice against
+    the study and the user's words. note: set by the caller when Gemini could not read instructions at all."""
+    b, rejected, assumptions = prev or B.DEFAULT, [], []
+    steps = [("Orchestrator", "Routed to the Drafting team")]
+    if brief_changes:
+        b, rejected, assumptions = B.validate(brief_changes, S, prompt, b)
+        steps.append(("Orchestrator", "Read your drafting instructions in the same call that routed this message; Python checked every choice"))
     scope = S.only(b["segments"]) if b["segments"] else S
     chk = steward.check(scope)
     if not chk["draft_ready"]:
         return f"I can't draft the full memo yet — missing: {', '.join(chk['gaps'])}. Upload the files here or add them to the data folder.", []
-    steps.append(("1 Data Steward", "All required files present"))
+    steps.append(("Data Steward", "All required files present"))
     trace = lambda agent, msg: (steps.append((agent, msg)), status.write(f"**{agent}** — {msg}"))
     cid = st.session_state.chat
-    ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))     # shared with this chat's Q&A (§2)
     d = D.draft(S, polish=A.polish_memo, trace=trace, brief=b, rejected=rejected, assumptions=assumptions, tag=cid, ledger=ledger)
     unpaid = " · ".join(f"**{X.reserve_summary(scope, x).summary['Total unpaid']} {x.lower()}**" for x in b["bases"])
     pyd = " · ".join(f"**{list(X.pyd(scope, x).summary['total'].values())[-1]} {x.lower()}**" for x in b["bases"])
@@ -188,6 +184,10 @@ def do_analyse(text, history, ledger, memo_state):
     return answer, arts + ([dict(type="meta", gemini=True)] if gemini else [])
 
 
+NOT_YET = {"edit_section": "Editing a single section isn't built yet in this preview", "fill_gaps": "Filling the memo's open items isn't built yet in this preview",
+           "gap_answer": "The interview flow isn't built yet in this preview"}
+
+
 def handle(prompt, files):
     global S
     cid = st.session_state.chat
@@ -202,21 +202,31 @@ def handle(prompt, files):
     else:
         store.add(cid, "user", prompt)
     msgs = store.messages(cid); history = [(m["role"], m["content"]) for m in msgs][:-1]
-    kind = A.route(prompt)
+    ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))
+    ms_art = last_artifact(cid, "memo_state")
+    memo_state = memo.from_json(ms_art["json"], ledger) if ms_art else None
+    intent = A.route_llm(S, prompt, history, memo_state is not None, [s["id"] for s in memo_state.sections] if memo_state else [], None)
+    gemini_routed = intent is not None
+    if intent is None: intent = A.Intent(kind=A.route_rules(prompt))
+    kind = intent.kind
     pend = next((a for a in (msgs[-2]["artifacts"] if len(msgs) > 1 else []) if a["type"] == "pending_draft"), None)   # Scribe asked before drafting
     if pend and kind != "draft": kind, prompt = "draft", f"{pend['text']}\nAnswer to your question: {prompt}"
     with st.chat_message("assistant", avatar=AVATAR):
-        if kind == "draft":
+        if kind == "draft" and intent.question and not pend:
+            text, arts = intent.question, [dict(type="pending_draft", text=prompt), dict(type="steps", items=[("Orchestrator", "Asked a clarifying question before drafting")])]
+        elif kind == "draft":
             with st.status("Drafting the memo…", expanded=True) as status:
-                text, arts = do_draft(status, prompt, (last_artifact(cid, "brief") or {}).get("brief")); status.update(label="Memo drafted", state="complete", expanded=False)
+                note = "" if gemini_routed else f"\n\n*{A.gemini_state()['why'] or 'Gemini is unavailable'} — I could not read any drafting instructions in your message, so this draft uses {'this chat’s previous brief' if memo_state else 'the defaults'}.*"
+                text, arts = do_draft(status, prompt, (last_artifact(cid, "brief") or {}).get("brief"), ledger, intent.brief_changes, note)
+                status.update(label="Memo drafted", state="complete", expanded=False)
+        elif kind in NOT_YET:
+            text, arts = f"{NOT_YET[kind]} — ask me to redraft the whole memo with your instruction instead.", []
         else:
             with st.spinner("Working on it…"):
-                if kind == "readiness": text, arts = readiness()
+                if kind == "data_check": text, arts = readiness()
                 elif kind == "about": text, arts = ABOUT, [dict(type="graph", dot=DOT)]
+                elif kind == "chitchat": text, arts = "Hi — ask me about the Apollo study, or say “draft the memo”.", []
                 else:
-                    ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))
-                    ms_art = last_artifact(cid, "memo_state")
-                    memo_state = memo.from_json(ms_art["json"], ledger) if ms_art else None
                     text, arts = do_analyse(prompt, history, ledger, memo_state)
                     arts = arts + [dict(type="ledger", json=ledger.to_json())]
     store.add(cid, "assistant", text, arts); chat_sync.save(cid)        # every chat is kept in the team repo automatically

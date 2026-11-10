@@ -1,6 +1,7 @@
-"""Drafting brief: the user-steerable choices for a memo draft. Gemini (agents.read_brief) proposes changes from the user's words;
-this module validates them against the study and the instruction text, merges them with the chat's current brief, and describes
-the result for the memo's "Basis of this draft" section. The fixed rules (CLAUDE.md §2, §4) are not part of the brief."""
+"""Drafting brief: the user-steerable choices for a memo draft. The Orchestrator (agents.route_llm) proposes
+brief_changes from the user's words in the same call that routes the message; this module validates them against
+the study and the instruction text, merges them with the chat's current brief, and describes the result for the
+memo's "Basis of this draft" section. The fixed rules (CLAUDE.md §2, §4) are not part of the brief."""
 import copy, re
 import specialists as X
 
@@ -12,14 +13,6 @@ CONTEXT_SECTIONS = {"scope": "Scope and Background", "business": "Description of
                     "responsibility": "Responsibility for Assumptions and Methods", "data": "Data", "risks": "Key Risks to the Reserve Estimate"}
 LABELS = {"segments": "Scope", "bases": "Bases", "sensitivity": "Sensitivity scenarios", "materiality": "AvE threshold", "ays_explained": "Accident years explained",
           "focus": "Accident years to cover", "exclude_cat": "CAT exclusion", "context": "Your text for a memo section"}
-FILLER = set("please draft redraft re prepare write generate create the a an for of me my our this that dvr reserving reserve memo report "
-             "entire whole all full business sub segments subsegments segment and again now".split())
-
-
-def needs_reading(text, S):
-    """True when a draft request carries more than 'draft the memo (for the business)': only then is Gemini asked to read it."""
-    lob = set(re.findall(r"[a-z]+", (S.lob or "").lower()))
-    return len([w for w in re.findall(r"[a-z]+", text.lower()) if w not in FILLER | lob]) >= 2
 
 
 def _figures(text):
@@ -37,13 +30,18 @@ def _years(S):
     return ays[0], ays[-1]
 
 
+BF_AMBIGUOUS = re.compile(r"\bbf\b", re.I)
+BF_QUALIFIED = re.compile(r"\b(incurred|paid)\b[^.]{0,20}\bbf\b|\bbf\b[^.]{0,20}\b(incurred|paid)\b", re.I)
+
+
 def validate(changes, S, text, prev):
-    """Apply Gemini's proposed changes to the current brief. Anything that fails a check is reported, never applied.
-    Returns (brief, rejected) with rejected = [(request, reason)]."""
-    b, bad = copy.deepcopy(prev), []
+    """Apply the Orchestrator's proposed brief_changes to the current brief. Anything that fails a check is
+    reported, never applied. Returns (brief, rejected, assumptions); rejected = [(request, reason)]."""
+    b, bad, assumptions = copy.deepcopy(prev), [], []
     figs = _figures(text); lo, hi = _years(S); keys = set(X.METHOD_KEYS)
     traced = lambda v: any(abs(v - f) < 1e-9 * max(1, abs(f)) for f in figs)
     yr = lambda y: y is None or (isinstance(y, int) and lo <= y <= hi)
+    bf_bare = bool(BF_AMBIGUOUS.search(text)) and not BF_QUALIFIED.search(text)
 
     def take(field, value):
         b[field] = value; b["user"] = sorted(set(b["user"]) | {field})
@@ -75,6 +73,8 @@ def validate(changes, S, text, prev):
                             raise ValueError("the weights read were not in your instruction — please restate them")
                         sp["weights"] = w
                     else: raise ValueError("unknown scenario type")
+                    for k in (sp.get("low"), sp.get("high"), *(sp.get("weights") or {})):
+                        if bf_bare and k in ("inc_bf", "paid_bf"): assumptions.append(f"BF taken as {'Incurred' if k == 'inc_bf' else 'Paid'} BF")
                     out.append(sp)
                 take(field, out)
             elif field == "materiality":
@@ -100,7 +100,7 @@ def validate(changes, S, text, prev):
             else: raise ValueError("not a drafting option")
         except (ValueError, TypeError, AttributeError) as e:
             bad.append((LABELS.get(field, field), str(e)))
-    return b, bad
+    return b, bad, sorted(set(assumptions))
 
 
 def describe(b, S, cite):

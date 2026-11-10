@@ -53,13 +53,74 @@ def _run(agent, prompt):
     return out.content or ""
 
 
-# ---------------- Orchestrator: routing ----------------
-def route(text):
+# ---------------- Orchestrator: routing (PLAN_v3 §3.1) ----------------
+class Intent(BaseModel):
+    kind: Literal["question", "draft", "edit_section", "fill_gaps", "gap_answer", "data_check", "about", "chitchat"]
+    segments: list[str] = []
+    bases: list[str] = []
+    accident_years: list[int] = []
+    section_id: str | None = None
+    instruction: str = ""
+    brief_changes: dict = {}
+    question: str | None = None
+
+
+def route_rules(text):
+    """Deterministic fallback kind when Gemini is unavailable (no scope/brief_changes extraction)."""
     t = text.lower()
     if re.search(r"\b(re-?draft|draft|prepare|write|generate|create|update|revise)\b.*\b(memo|dvr|report)\b|^\s*(re-?)?draft\b", t): return "draft"
-    if re.search(r"\b(what|which) (data|files)\b|\bdata (is )?available\b|\bready\b|\breadiness\b|\bmissing\b|\bdata check\b", t): return "readiness"
+    if re.search(r"\b(what|which) (data|files)\b|\bdata (is )?available\b|\bready\b|\breadiness\b|\bmissing\b|\bdata check\b", t): return "data_check"
     if re.search(r"what can you do|how do you work|\barchitecture\b|\bwhich agents\b|^\s*help\b|\bcapabilit", t): return "about"
-    return "analyse"
+    return "question"
+
+
+ORCH_RULES = """You are Scribe's Orchestrator for an Apollo reserve study: {lob}; sub-segments {segments}; bases GROSS and
+NET; accident years {ays}; evaluation {evaluation}. Apollo method keys: {methods}.
+Classify the user's latest message into exactly one kind:
+- "question": anything about the study's numbers, methods, diagnostics, LDFs, AvE, claims, or "why does the memo say X" —
+  including requests to explain or understand a figure. Never use "about" for these.
+- "draft": draft or redraft the memo (first draft, or re-run it with new instructions).
+- "edit_section": change or rewrite ONE existing section of an already-drafted memo (e.g. "make the PYD section shorter").
+  section_id must be one of: {order}. instruction = the user's words, verbatim. Only valid when a memo already exists
+  (see context below) — otherwise use "draft".
+- "fill_gaps": the user wants to start answering the memo's open [INPUT REQUIRED] items ("let's fill the gaps", "what's
+  still missing"). Only valid when a memo already exists.
+- "gap_answer": the context below says an interview is active and this message answers the pending item, or says "skip"/"stop".
+- "data_check": asking what data is available, what's missing, or whether Scribe is ready.
+- "about": asking how Scribe works, its architecture, or what it can do — not a question about the study itself.
+- "chitchat": greetings or anything with no study content.
+segments/bases/accident_years: scope named in THIS message (empty = unspecified/all) — set these for "question" and
+"draft" alike (e.g. "draft the memo for GL" -> segments ["GL"]; "how is AvE doing for AL" -> segments ["AL"]).
+brief_changes (only for "draft"): include ONLY fields this message actually sets, same JSON contract as the drafting
+brief — {"segments": [...] or null, "bases": [...], "sensitivity": [{"type":"min_max","methods":[keys] or null,
+"ay_from":int|null,"ay_to":int|null} | {"type":"methods","low":key,"high":key,...} | {"type":"weights",
+"weights":{key:fraction},...}], "materiality": number, "ays_explained": int, "focus": {seg: [years]},
+"exclude_cat": bool, "context": {section: "the user's own words, verbatim"}}. Never invent a figure or sentence not
+in the user's words. "BF" without paid/incurred = inc_bf.
+instruction: the user's words verbatim, for "edit_section" only.
+question: set only if the request is genuinely ambiguous with no reasonable assumption; otherwise null."""
+
+
+def orchestrator(S):
+    lo, hi = B._years(S)
+    rules = ORCH_RULES
+    for k, v in dict(lob=S.lob, segments=", ".join(f"{s} ({seg_name(s)})" for s in S.segments), ays=f"{lo}–{hi}", evaluation=S.evaluation,
+                     methods=", ".join(f"{k} = {n}" for k, n in X.METHOD_KEYS.items()), order=", ".join(D.ORDER)).items():
+        rules = rules.replace(f"{{{k}}}", str(v))
+    return _agent(rules, output_schema=Intent)
+
+
+def route_llm(S, text, history, memo_exists, section_ids, interview_pending):
+    """One Gemini call -> Intent, or None if Gemini is unavailable/fails (caller falls back to route_rules)."""
+    if not gemini_model(): return None
+    try:
+        ctx = "\n".join(f"{r}: {m[:400]}" for r, m in history[-6:])
+        ctx += ("\nA memo already exists in this chat" + (f" (sections: {', '.join(section_ids)})." if section_ids else ".")
+                if memo_exists else "\nNo memo has been drafted in this chat yet.")
+        if interview_pending: ctx += f"\nAn interview is active; pending item: {interview_pending}."
+        return _run(orchestrator(S), f"{ctx}\n\nUser message: {text}")
+    except Exception as e:
+        _api_failed(e); return None
 
 
 # ---------------- Claims Investigator (agent-as-tool for the Analyst/Section Writer) ----------------
@@ -164,50 +225,6 @@ def analyse(S, text, history, ledger, memo=None):
     return (f"{gemini_state()['why'] or 'Gemini is unavailable'}. The Analyst needs Gemini to plan which exhibits to read, so I can't answer this "
             f"one right now — {'it will work again once the limit resets' if 'quota' in gemini_state()['why'] or 'limit' in gemini_state()['why'] else 'please try again shortly'}. "
             f"The Apollo tabs most relevant to your question: {tabs}."), [], turn["steps"], [], False, []
-
-
-# ---------------- Brief agent: the user's drafting instructions → validated drafting brief (one Gemini call) ----------------
-BRIEF_RULES = """You turn a reserving actuary's drafting instructions into changes to a JSON drafting brief for a DVR memo.
-Study: <lob>; sub-segments <segments>; accident years <ays>; evaluation <evaluation>. Apollo method keys: <methods>.
-Current brief: <current>
-Return ONLY a JSON object: {"changes": {...}, "assumptions": ["..."], "unsupported": [{"request": "...", "reason": "..."}], "question": ""}
-"changes" holds only the fields the latest instruction sets or changes:
-- segments: list of sub-segment codes (null = all). bases: subset of ["GROSS","NET"].
-- sensitivity: the FULL list of scenarios, each one of
-  {"type":"min_max","methods":[keys] or null (= all actuarial methods),"ay_from":int|null,"ay_to":int|null}
-  {"type":"methods","low":key,"high":key,"ay_from":int|null,"ay_to":int|null}
-  {"type":"weights","weights":{key: fraction},"ay_from":int|null,"ay_to":int|null}
-- materiality: dollar threshold for explaining AvE by accident year ("$1m" -> 1000000).
-- ays_explained: how many accident years to explain per sub-segment in the PYD/AvE commentary.
-- focus: {segment code: [accident years]} always explained. exclude_cat: true to also show AvE excluding CAT claim movements.
-- context: {section: the user's own words} for text the user gives for sections: <sections>. Copy their words exactly; never write your own.
-Rules: Scribe never recalculates Apollo. Anything needing new LDFs, ELRs, tail factors, trends or indications Apollo did not produce, a change to
-the memo's table definitions, or invented text goes to "unsupported" with a one-line reason. "Highest/lowest of all methods" = min_max.
-"BF" without paid/incurred = inc_bf, with the assumption "BF taken as Incurred BF". Assumptions: short sentences without figures.
-Set "question" only if the instruction cannot be carried out without an answer and no reasonable assumption exists; otherwise "".
-Omit fields the user did not mention."""
-
-
-def read_brief(S, text, prev):
-    """Brief agent. Returns (brief, rejected, assumptions, question); rejected = [(request, reason)]. Raises if Gemini is unavailable."""
-    if not gemini_model(): raise RuntimeError(gemini_state()["why"] or "Gemini unavailable")
-    lo, hi = B._years(S)
-    rules = BRIEF_RULES
-    for k, v in dict(lob=S.lob, segments=", ".join(f"{s} ({seg_name(s)})" for s in S.segments), ays=f"{lo}–{hi}", evaluation=S.evaluation,
-                     methods=", ".join(f"{k} = {n}" for k, n in X.METHOD_KEYS.items()), current=json.dumps({k: v for k, v in prev.items() if k != "user"}),
-                     sections=", ".join(B.CONTEXT_SECTIONS)).items():
-        rules = rules.replace(f"<{k}>", str(v))
-    try:
-        out = json.loads(re.search(r"\{.*\}", re.sub(r"```(json)?", "", _run(_agent(rules), f"Instruction: {text}")), re.S).group(0))
-    except Exception as e:
-        if not isinstance(e, (ValueError, AttributeError)): _api_failed(e)
-        raise RuntimeError(gemini_state()["why"] or "unreadable reply from Gemini")
-    brief, bad = B.validate(out.get("changes") or {}, S, text, prev)
-    figs = B._figures(text)
-    keep = lambda a: all(float(x) in figs for x in re.findall(r"\d+(?:\.\d+)?", a.replace(",", "")) if not 1900 <= float(x) <= 2100)
-    assumptions = [a for a in out.get("assumptions") or [] if isinstance(a, str) and keep(a)]
-    bad += [(u.get("request", ""), u.get("reason", "")) for u in out.get("unsupported") or [] if isinstance(u, dict)]
-    return brief, bad, assumptions, str(out.get("question") or "").strip()
 
 
 # ---------------- memo polish (one Gemini call per memo, verifier-gated) ----------------

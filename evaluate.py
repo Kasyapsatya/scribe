@@ -14,14 +14,11 @@ import tools as T
 from ledger import Ledger, CalcError, untraced
 
 GOLDEN = json.loads((DATA.parent / "golden_labels.json").read_text())
-ROUTES = [("What data is available?", "readiness"), ("Is anything missing?", "readiness"), ("Draft the DVR memo", "draft"),
-          ("Please prepare the memo", "draft"), ("What can you do?", "about"), ("How were LDFs selected for GL?", "analyse"),
-          ("Select BF for all AYs for WC", "analyse"), ("Show settlement rate for WC", "analyse"), ("Why is the memo PYD adverse?", "analyse"),
-          ("What drove AvE on AL 2021?", "analyse"), ("Redraft with high = Paid BF", "draft"), ("Update the memo: exclude CAT", "draft")]
-PLAIN = ["Draft the DVR memo", "Draft the reserving memo for the entire Casualty business", "Please prepare the memo", "redraft the memo"]
-STEERED = ["Draft the memo, sensitivity lowest to highest method", "Draft the memo for GL only", "Redraft with high = Paid BF",
-           "Draft the memo and explain AvE above $1m"]
-# Brief agent golden set (needs Gemini): instruction → fields the brief must hold
+ROUTES = [("What data is available?", "data_check"), ("Is anything missing?", "data_check"), ("Draft the DVR memo", "draft"),
+          ("Please prepare the memo", "draft"), ("What can you do?", "about"), ("How were LDFs selected for GL?", "question"),
+          ("Select BF for all AYs for WC", "question"), ("Show settlement rate for WC", "question"), ("Why is the memo PYD adverse?", "question"),
+          ("What drove AvE on AL 2021?", "question"), ("Redraft with high = Paid BF", "draft"), ("Update the memo: exclude CAT", "draft")]
+# Orchestrator brief_changes golden set (needs Gemini): instruction → fields the validated brief must hold
 BRIEF_GOLD = [("Draft the reserving memo for the entire Casualty business, consider highest of all the methods as the high end and lowest of all methods "
                "as low end for the sensitivity testing.", lambda b, bad: b["sensitivity"][0]["type"] == "min_max" and "sensitivity" in b["user"]),
               ("Draft the memo for GL and WC only, net basis", lambda b, bad: b["segments"] == ["GL", "WC"] and b["bases"] == ["NET"]),
@@ -113,19 +110,17 @@ def run(S=None, qa=False):
                          S3.segments == ["AL", "GL"] and r3["draft_ready"] and "Workers Comp" not in memo and not any(d3.issues.values()),
                          f"{S3.segments}, ready={r3['draft_ready']}, gaps={r3['gaps']}, WC in memo={'Workers Comp' in memo}, issues={ {k: v for k, v in d3.issues.items() if v} }"))
     # 6 router
-    hits = sum(A.route(q) == k for q, k in ROUTES)
-    out.append(check("Orchestrator routing on test prompts", hits == len(ROUTES), f"{hits}/{len(ROUTES)}"))
-    out.append(check("Brief agent is only asked when a draft request carries instructions",
-                     not any(B.needs_reading(q, S) for q in PLAIN) and all(B.needs_reading(q, S) for q in STEERED)))
+    hits = sum(A.route_rules(q) == k for q, k in ROUTES)
+    out.append(check("Orchestrator regex fallback (route_rules) on test prompts", hits == len(ROUTES), f"{hits}/{len(ROUTES)}"))
     # 6b drafting brief: validation keeps only choices the study and the user's words support
     txt = "Draft for GL and WC, net only. Low = paid DFM, high = BF for AYs 2020-2024, 50/50 inc DFM and BF too. Explain AvE above $1m. Business: contractors' GL via brokers."
     good = {"segments": ["GL", "WC"], "bases": ["NET"], "materiality": 1e6, "context": {"business": "contractors' GL via brokers"},
             "sensitivity": [{"type": "methods", "low": "paid_dfm", "high": "inc_bf", "ay_from": 2020, "ay_to": 2024},
                             {"type": "weights", "weights": {"inc_dfm": 0.5, "inc_bf": 0.5}}]}
-    b1, bad1 = B.validate(good, S, txt, B.DEFAULT)
+    b1, bad1, assum1 = B.validate(good, S, txt, B.DEFAULT)
     wrong = {"segments": ["XX"], "materiality": 1.5e6, "context": {"business": "a leading national book with strong growth"},
              "sensitivity": [{"type": "weights", "weights": {"inc_bf": 0.7, "inc_dfm": 0.3}}], "tail": 1.05}
-    b2, bad2 = B.validate(wrong, S, txt, B.DEFAULT)
+    b2, bad2, assum2 = B.validate(wrong, S, txt, B.DEFAULT)
     out.append(check("Brief validation: applies supported choices, rejects invented figures / text / unknown options",
                      not bad1 and b1["user"] == sorted(good) and len(bad2) == 5 and b2["user"] == [], f"{len(bad2)} rejected: {[r for r, _ in bad2]}"))
     # 6c memo follows the brief: scope, bases, sensitivity scenarios, context, basis note
@@ -214,6 +209,11 @@ def run(S=None, qa=False):
     out.append(check("replace_section replaces only p/b/h3 text, in order; tables and 'u' blocks are kept",
                      [b for b in after_sec["blocks"] if b[0] == "table"] == tables0 and [b for b in after_sec["blocks"] if b[0] == "u"] == u0
                      and [b[1] for b in after_sec["blocks"] if b[0] in ("p", "b", "h3")] == [t.upper() for t in texts]))
+    # 17 brief.validate states the BF assumption only when the instruction left paid/incurred unspecified
+    _, _, bare = B.validate({"sensitivity": [{"type": "weights", "weights": {"inc_bf": 1.0}}]}, S, "Select BF for all AYs for WC", B.DEFAULT)
+    _, _, qualified = B.validate({"sensitivity": [{"type": "weights", "weights": {"paid_bf": 1.0}}]}, S, "Select Paid BF for all AYs for WC", B.DEFAULT)
+    out.append(check("brief.validate flags the BF assumption only when paid/incurred was left unspecified",
+                     bare == ["BF taken as Incurred BF"] and qualified == [], f"bare={bare}, qualified={qualified}"))
     # 8 Q&A golden set (Gemini)
     if qa:
         gold = [("What is the total net PYD for General Liability?", X.pyd(S, "NET", "GL").summary["total"]["General Liability"]),
@@ -227,8 +227,17 @@ def run(S=None, qa=False):
         out.append(check("Q&A golden set (Gemini)", hits == len(gold), f"{hits}/{len(gold)}"))
         res = []
         for q, ok in BRIEF_GOLD:
-            b, bad, _, _ = A.read_brief(S, q, B.DEFAULT); res.append(bool(ok(b, bad)))
-        out.append(check("Brief agent golden set (Gemini)", all(res), f"{sum(res)}/{len(res)}"))
+            intent = A.route_llm(S, q, [], memo_exists=False, section_ids=[], interview_pending=None)
+            b, bad, _ = B.validate(intent.brief_changes if intent else {}, S, q, B.DEFAULT)
+            res.append(bool(intent) and bool(ok(b, bad)))
+        out.append(check("Orchestrator brief_changes golden set (Gemini)", all(res), f"{sum(res)}/{len(res)}"))
+        intent_gold = [("draft the memo for GL", dict(kind="draft", segments=["GL"])), ("help me understand IBNR for AL", dict(kind="question")),
+                       ("make the PYD section shorter", dict(kind="edit_section", section_id="pyd")), ("let's fill the gaps", dict(kind="fill_gaps"))]
+        res2 = []
+        for q, want in intent_gold:
+            intent = A.route_llm(S, q, [], memo_exists=True, section_ids=D.ORDER, interview_pending=None)
+            res2.append(bool(intent) and all(getattr(intent, k) == v for k, v in want.items()))
+        out.append(check("Orchestrator intent golden set (Gemini)", all(res2), f"{sum(res2)}/{len(res2)}"))
     return out
 
 
