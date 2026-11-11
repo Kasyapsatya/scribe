@@ -13,6 +13,7 @@ STUDY_TOOLS = ["find_sections", "reserve_summary", "prior_year_development", "re
                "actual_vs_expected", "read_exhibit"]
 EVIDENCE_TOOLS = ["calculate", "explain_figure"]
 MEMO_TOOLS = ["read_memo_section", "search_memo"]
+INTERVIEW_TOOLS = ["list_open_inputs", "fill_input", "explain_figure"]
 
 
 def build_tools(S, ledger, turn, allow, memo=None):
@@ -140,6 +141,24 @@ def build_tools(S, ledger, turn, allow, memo=None):
         turn["steps"].append(("Drafting team", f"Searched the memo for “{text}” — requested by Gemini"))
         return json.dumps(M.search(memo, text))
 
+    def list_open_inputs() -> str:
+        """Interviewer: every open [INPUT REQUIRED] item in the memo, ranked most material first. Each item has
+        an item_id for fill_input."""
+        if memo is None: return "ERROR: no memo has been drafted in this chat yet"
+        items = M.rank_open_inputs(memo)
+        turn["steps"].append(("Interviewer", f"Listed {len(items)} open memo item(s) — requested by Gemini"))
+        return json.dumps(items)
+
+    def fill_input(item_id: str, text: str) -> str:
+        """Interviewer: insert the actuary's own words verbatim for one open item — never write the answer yourself."""
+        if memo is None: return "ERROR: no memo has been drafted in this chat yet"
+        try:
+            out = M.fill(memo, item_id, text)
+            turn["steps"].append(("Interviewer", f"Filled {item_id} ({out['what']}) — requested by Gemini"))
+            return json.dumps(out)
+        except KeyError as e:
+            return f"ERROR: {e}"
+
     def scan_study() -> str:
         """First Look: deterministic review candidates — largest PYD AYs, judgmental/outside-range LDFs, diagnostic
         calendar-year shifts, largest |A−E| with its driver label, widest method spread — each with its reference."""
@@ -155,7 +174,7 @@ def build_tools(S, ledger, turn, allow, memo=None):
                  method_indications=method_indications, what_if_weights=what_if_weights, sensitivity_range=sensitivity_range,
                  diagnostic=diagnostic, actual_vs_expected=actual_vs_expected, claim_movements=claim_movements,
                  read_exhibit=read_exhibit, calculate=calculate, explain_figure=explain_figure, scan_study=scan_study,
-                 read_memo_section=read_memo_section, search_memo=search_memo)
+                 read_memo_section=read_memo_section, search_memo=search_memo, list_open_inputs=list_open_inputs, fill_input=fill_input)
     missing = [a for a in allow if a not in tools]
     if missing: raise KeyError(f"tools.build_tools: not implemented yet: {missing}")
     return [tools[a] for a in allow]

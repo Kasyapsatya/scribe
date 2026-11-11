@@ -309,3 +309,44 @@ def redraft_section(S, ledger, memo_state, section_id, instruction):
     if sec is None: return False, f"no memo section '{section_id}'", []
     _, new_texts, turn, why = _write_one(S, ledger, sec, instruction, memo_state)
     return (True, new_texts, turn["steps"]) if new_texts else (False, why, turn["steps"])
+
+
+# ---------------- Interviewer (fill_gaps / gap_answer, one Gemini call per turn) ----------------
+class InterviewTurn(BaseModel):
+    message: str                    # shown to the user, {{Fxxxx}} placeholders for any figures
+    item_id: str | None = None      # the item now pending an answer (None once done)
+    done: bool = False              # true when there is nothing left to ask
+
+
+INTERVIEWER_RULES = """You help a reserving actuary fill the open items in a drafted DVR memo, one at a time, most
+material first. Call list_open_inputs() first — it returns items already ranked, each with an item_id and what it needs.
+- If a pending item is given below and the user's latest message answers it with real content (not "skip" or "stop"),
+  call fill_input(pending_item_id, <the user's words, verbatim — never rewrite them>). Confirm briefly where it went,
+  then ask the next remaining item the same way as below (set item_id to it).
+- If the user said "skip", move to the next remaining item without filling the pending one.
+- If the user said "stop", set done=true, item_id=null, and say the interview ended (anything already filled stays).
+- Otherwise (starting fresh, or continuing after a fill/skip): ask ONE question, in message, for the first remaining
+  item — show the relevant figures as {{Fxxxx}} placeholders (use explain_figure if useful); set item_id to that item.
+- If list_open_inputs() returns no items left, set done=true, item_id=null, and say the memo has no open items left.
+Never write an answer yourself — only the actuary's own words go into fill_input."""
+
+
+def interviewer(S, ledger, turn, memo):
+    return _agent(INTERVIEWER_RULES, T.build_tools(S, ledger, turn, T.INTERVIEW_TOOLS, memo), output_schema=InterviewTurn)
+
+
+def interview_turn(S, ledger, memo, text, pending_item_id):
+    """One Interviewer turn (fill_gaps starts it with pending_item_id=None; gap_answer continues it).
+    Returns (InterviewTurn or None, steps)."""
+    turn = dict(results=[], steps=[("Orchestrator", "Routed to the Interviewer")])
+    if not gemini_model():
+        turn["steps"].append(("Orchestrator", f"{gemini_state()['why'] or 'Gemini unavailable'} — can't continue the interview right now"))
+        return None, turn["steps"]
+    try:
+        ctx = f"Pending item: {pending_item_id}.\n" if pending_item_id else "Starting the interview now.\n"
+        out = _run(interviewer(S, ledger, turn, memo), f"{ctx}User's latest message: {text}")
+        turn["steps"].append(("Interviewer", "Interview ended" if out.done else f"Asked item {out.item_id}"))
+        return out, turn["steps"]
+    except Exception as e:
+        _api_failed(e); turn["steps"].append(("Orchestrator", f"{gemini_state()['why']} during the interview"))
+        return None, turn["steps"]

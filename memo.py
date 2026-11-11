@@ -82,6 +82,16 @@ def open_inputs(memo):
     return items
 
 
+SECTION_PRIORITY = {"assumptions": 0, "pyd": 1, "diagnostics": 2}      # judgmental LDFs > PYD/AvE drivers > diagnostics > everything else
+
+
+def rank_open_inputs(memo):
+    """open_inputs(), most material first (Interviewer, PLAN_v3 §6): judgmental LDF rationale, then PYD/AvE
+    driver conclusions, then diagnostics, then the single-topic sections in template order."""
+    order = {s["id"]: i for i, s in enumerate(memo.sections)}
+    return sorted(open_inputs(memo), key=lambda it: (SECTION_PRIORITY.get(it["section_id"], 3), order.get(it["section_id"], 99)))
+
+
 def fill(memo, item_id, text):
     """Strip the matched [INPUT REQUIRED: ...] from its sentence; record the actuary's words verbatim as a new
     'u' block ("Analyst input") at the end of that section."""

@@ -184,7 +184,23 @@ def do_analyse(text, history, ledger, memo_state):
     return answer, arts + ([dict(type="meta", gemini=True)] if gemini else [])
 
 
-NOT_YET = {"fill_gaps": "Filling the memo's open items isn't built yet in this preview", "gap_answer": "The interview flow isn't built yet in this preview"}
+def do_interview(ledger, memo_state, text, interview_art):
+    """fill_gaps starts the interview fresh (interview_art=None); gap_answer continues the one in interview_art."""
+    n_total = (interview_art or {}).get("n_total") or len(memo.rank_open_inputs(memo_state))
+    pending_item_id = (interview_art or {}).get("item_id")
+    out, steps = A.interview_turn(S, ledger, memo_state, text, pending_item_id)
+    if out is None:
+        why = A.gemini_state()["why"] or "Gemini is unavailable"
+        arts = [dict(type="steps", items=steps)]
+        if interview_art: arts.append(interview_art)                 # keep the same item pending — nothing was lost
+        return f"{why} — I can't continue the interview right now. Try again shortly.", arts
+    memo.rebuild_docx(memo_state)
+    remaining = len(memo.rank_open_inputs(memo_state))
+    k = max(1, n_total - remaining + (0 if out.item_id else 1))
+    text_out = (out.message if out.done else f"*Item {min(k, n_total)} of {n_total}.*\n\n{out.message}")
+    arts = [dict(type="steps", items=steps), dict(type="ledger", json=ledger.to_json()), dict(type="memo_state", json=memo.to_json(memo_state))]
+    if not out.done: arts.append(dict(type="interview", item_id=out.item_id, n_total=n_total))
+    return text_out, arts
 
 
 def do_edit_section(ledger, memo_state, section_id, instruction):
@@ -217,7 +233,10 @@ def handle(prompt, files):
     ledger = Ledger.from_json((last_artifact(cid, "ledger") or {}).get("json", ""))
     ms_art = last_artifact(cid, "memo_state")
     memo_state = memo.from_json(ms_art["json"], ledger) if ms_art else None
-    intent = A.route_llm(S, prompt, history, memo_state is not None, [s["id"] for s in memo_state.sections] if memo_state else [], None)
+    interview_art = last_artifact(cid, "interview")
+    pending_desc = next((i["what"] for i in memo.rank_open_inputs(memo_state) if i["item_id"] == interview_art["item_id"]), None) \
+        if interview_art and memo_state else None
+    intent = A.route_llm(S, prompt, history, memo_state is not None, [s["id"] for s in memo_state.sections] if memo_state else [], pending_desc)
     gemini_routed = intent is not None
     if intent is None: intent = A.Intent(kind=A.route_rules(prompt))
     kind = intent.kind
@@ -237,8 +256,12 @@ def handle(prompt, files):
             else:
                 with st.spinner("Redrafting the section…"):
                     text, arts = do_edit_section(ledger, memo_state, intent.section_id, intent.instruction)
-        elif kind in NOT_YET:
-            text, arts = f"{NOT_YET[kind]} — ask me to redraft the whole memo with your instruction instead.", []
+        elif kind in ("fill_gaps", "gap_answer"):
+            if memo_state is None:
+                text, arts = "There's no memo in this chat yet to fill gaps in — draft the memo first.", []
+            else:
+                with st.spinner("Working through the open items…"):
+                    text, arts = do_interview(ledger, memo_state, prompt, interview_art if kind == "gap_answer" else None)
         else:
             with st.spinner("Working on it…"):
                 if kind == "data_check": text, arts = readiness()

@@ -234,6 +234,26 @@ def run(S=None, qa=False):
     pyd_after = [b for b in next(s for s in ms6.sections if s["id"] == "pyd")["blocks"]]
     out.append(check("redraft_section: Gemini off fails clearly and leaves the section untouched",
                      not ok6 and isinstance(reason6, str) and pyd_after == pyd_before))
+    # 20 rank_open_inputs: judgmental LDFs first, then PYD/AvE, then diagnostics, then everything else
+    ranked = M.rank_open_inputs(ms6)
+    sections_in_order = [i["section_id"] for i in ranked]
+    prio = lambda sid: M.SECTION_PRIORITY.get(sid, 3)
+    out.append(check("rank_open_inputs: most material first (assumptions, pyd, diagnostics, then the rest)",
+                     sections_in_order == sorted(sections_in_order, key=prio) and len(ranked) == len(M.open_inputs(ms6)),
+                     f"order: {sections_in_order[:6]}…"))
+    # 21 Interviewer tool wiring + fallback: list_open_inputs/fill_input work via tools.py; Gemini off fails clearly
+    turn8 = dict(results=[], steps=[])
+    fns8 = {f.__name__: f for f in T.build_tools(S, ms6.ledger, turn8, T.INTERVIEW_TOOLS, ms6)}
+    items8 = json.loads(fns8["list_open_inputs"]())
+    filled8 = json.loads(fns8["fill_input"](items8[0]["item_id"], "test answer"))
+    items8_after = json.loads(fns8["list_open_inputs"]())
+    A.gemini_model = lambda: None
+    try:
+        out9, steps9 = A.interview_turn(S, ms6.ledger, ms6, "let's fill the gaps", None)
+    finally:
+        A.gemini_model = orig_gemini_model
+    out.append(check("Interviewer: list_open_inputs/fill_input work standalone; interview_turn fails clearly when Gemini is off",
+                     len(items8_after) == len(items8) - 1 and filled8["item_id"] == items8[0]["item_id"] and out9 is None and bool(steps9)))
     # 8 Q&A golden set (Gemini)
     if qa:
         gold = [("What is the total net PYD for General Liability?", X.pyd(S, "NET", "GL").summary["total"]["General Liability"]),
@@ -269,6 +289,16 @@ def run(S=None, qa=False):
         other_after = {s["id"]: s["blocks"] for s in ms7.sections if s["id"] != "pyd"}
         out.append(check("redraft_section (Gemini): only the named section changes and the docx rebuilds",
                          ok7 and other_after == other_before and Path(ms7.docx).exists(), f"ok={ok7}"))
+        # Interviewer: item 1 offered, the actuary's answer lands verbatim, item 2 offered
+        before8 = M.rank_open_inputs(ms7)
+        out1, _ = A.interview_turn(S, ms7.ledger, ms7, "let's fill the gaps", None)
+        ok8 = bool(out1) and not out1.done and out1.item_id == before8[0]["item_id"]
+        ans_text = "Because claims staff flagged a change in settlement patterns this quarter."
+        out2, _ = A.interview_turn(S, ms7.ledger, ms7, ans_text, out1.item_id if out1 else None)
+        filled_sec = next(s for s in ms7.sections if s["id"] == before8[0]["section_id"]) if ok8 else None
+        verbatim_ok = ok8 and any(b[0] == "u" and ans_text in b[2] for b in filled_sec["blocks"])
+        out.append(check("Interviewer (Gemini): offers the top-ranked item, records the actuary's answer verbatim, offers the next item",
+                         ok8 and verbatim_ok and bool(out2) and not out2.done and out2.item_id != out1.item_id, f"item1={out1.item_id if out1 else None}"))
     return out
 
 
