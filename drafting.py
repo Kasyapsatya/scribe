@@ -265,7 +265,7 @@ def analysis_sections(S, C, trace, b):
     methods.append(("p", IR("strengths and shortcomings of each method for this book, and the Cape Cod ELR / decay derivation")))
     return [sec("sensitivity", "Sensitivity Testing", "2e Diagnostics & Risks", sensitivity_blocks(S, C, b) + sens
                 + [("p", IR("benchmarking against industry LDFs and any additional sensitivity tests"))]),
-            sec("risks", "Key Risks to the Reserve Estimate", "2e Diagnostics & Risks", [("b", r) for r in risks] + [("b", IR("other key risks (social inflation, legal environment, data)"))]),
+            sec("risks", "Key Risks to the Reserve Estimate", "2e Diagnostics & Risks", [("b", r) for r in risks] + [("b", IR("other key risks (social inflation, legal environment, data)"))], True),
             sec("stat", "Stat/GAAP", "1 Orchestrator", [("p", IR("Stat/GAAP — select applicable option"))]),
             sec("limitations", "Limitations", "1 Orchestrator", [("p", IR("limitations — select applicable option"))]),
             sec("methodology", "Analysis Methodology", "1 Orchestrator", []),
@@ -408,8 +408,10 @@ class Draft:
     flags: int
 
 
-def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=(), assumptions=(), tag="", ledger=None):
-    """Drafting team: build to the brief → verify → (optional LLM polish, verifier-gated) → assemble.
+def draft(S, write=None, trace=lambda agent, msg: None, brief=None, rejected=(), assumptions=(), tag="", ledger=None):
+    """Drafting team: build tables and sections in code → (optional Section Writers, verifier-gated) → verify → assemble.
+    write(S, sections, ledger, brief, trace): rewrites the narrative sections in place (agents.write_sections); a
+    section that fails tie-out, or any call made while Gemini is unavailable, keeps its code-drafted wording.
     ledger: this chat's shared Ledger (PLAN_v3 §2) to cite into, so memo and chat answers trace to the same refs;
     a fresh one is used when not given (e.g. the offline evaluation suite)."""
     t0 = time.time(); OUT.mkdir(exist_ok=True); C = ledger if ledger is not None else Citations(); b = brief or B.DEFAULT
@@ -420,9 +422,9 @@ def draft(S, polish=None, trace=lambda agent, msg: None, brief=None, rejected=()
     secs += closing_sections(sorted(p["file"] for p in S.packs) + [f for f in ("claims", "AvE") if (S.claims if f == "claims" else S.ave) is not None])
     apply_context(secs, b)
     secs = sorted(secs, key=lambda s: ORDER.index(s["id"]))
+    if write: write(S, secs, C, b, trace)
     issues = {s["id"]: verify(s, C) for s in secs}
     trace("4 Verifier", f"{sum(not v for v in issues.values())}/{len(secs)} sections tie out to source cells")
-    if polish: polish(secs, C, trace)
     path = OUT / f"DVR_Draft_{S.lob.replace(' ', '_')}_{S.evaluation}{'_' + tag if tag else ''}.docx"     # tag = chat id: users never overwrite each other
     assemble(secs, C, path, f"DVR — {S.lob} ({', '.join(seg_name(s) for s in S.segments)}) — {S.evaluation}")
     path.with_suffix(".evidence.json").write_text(json.dumps({k: dict(v, rendered=fmt(v["value"], v["unit"], "text")) for k, v in C.items.items()}, indent=1))

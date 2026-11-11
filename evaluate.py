@@ -214,6 +214,26 @@ def run(S=None, qa=False):
     _, _, qualified = B.validate({"sensitivity": [{"type": "weights", "weights": {"paid_bf": 1.0}}]}, S, "Select Paid BF for all AYs for WC", B.DEFAULT)
     out.append(check("brief.validate flags the BF assumption only when paid/incurred was left unspecified",
                      bare == ["BF taken as Incurred BF"] and qualified == [], f"bare={bare}, qualified={qualified}"))
+    # 18 Section Writer fallback: with Gemini off, draft() still produces a fully-verified memo of the same shape
+    orig_gemini_model = A.gemini_model
+    A.gemini_model = lambda: None
+    try:
+        d6 = D.draft(S, ledger=Ledger(), write=A.write_sections)
+    finally:
+        A.gemini_model = orig_gemini_model
+    out.append(check("Section Writer fallback: Gemini off -> draft() keeps code-drafted wording, same shape, fully verified",
+                     len(d6.sections) == len(D.draft(S).sections) and not any(d6.issues.values())))
+    # 19 redraft_section fallback: Gemini off fails clearly, without touching the section
+    ms6 = M.from_draft(d6, B.DEFAULT, "test subject")
+    pyd_before = [b for b in next(s for s in ms6.sections if s["id"] == "pyd")["blocks"]]
+    A.gemini_model = lambda: None
+    try:
+        ok6, reason6, _ = A.redraft_section(S, ms6.ledger, ms6, "pyd", "make it shorter")
+    finally:
+        A.gemini_model = orig_gemini_model
+    pyd_after = [b for b in next(s for s in ms6.sections if s["id"] == "pyd")["blocks"]]
+    out.append(check("redraft_section: Gemini off fails clearly and leaves the section untouched",
+                     not ok6 and isinstance(reason6, str) and pyd_after == pyd_before))
     # 8 Q&A golden set (Gemini)
     if qa:
         gold = [("What is the total net PYD for General Liability?", X.pyd(S, "NET", "GL").summary["total"]["General Liability"]),
@@ -238,6 +258,17 @@ def run(S=None, qa=False):
             intent = A.route_llm(S, q, [], memo_exists=True, section_ids=D.ORDER, interview_pending=None)
             res2.append(bool(intent) and all(getattr(intent, k) == v for k, v in want.items()))
         out.append(check("Orchestrator intent golden set (Gemini)", all(res2), f"{sum(res2)}/{len(res2)}"))
+        # full draft: every Section Writer section verifies
+        led7 = Ledger(); d7 = D.draft(S, write=A.write_sections, ledger=led7)
+        out.append(check("Section Writer: full draft verifies (Gemini)", not any(d7.issues.values()), f"{len(d7.citations.items)} figures"))
+        # redraft one section: only that section changes, instruction followed, docx rebuilds
+        ms7 = M.from_draft(d7, B.DEFAULT, "test subject")
+        other_before = {s["id"]: s["blocks"] for s in ms7.sections if s["id"] != "pyd"}
+        ok7, texts7, _ = A.redraft_section(S, led7, ms7, "pyd", "Make this section two short paragraphs for the Reserve Committee.")
+        if ok7: M.replace_section(ms7, "pyd", texts7); M.rebuild_docx(ms7)
+        other_after = {s["id"]: s["blocks"] for s in ms7.sections if s["id"] != "pyd"}
+        out.append(check("redraft_section (Gemini): only the named section changes and the docx rebuilds",
+                         ok7 and other_after == other_before and Path(ms7.docx).exists(), f"ok={ok7}"))
     return out
 
 

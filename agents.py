@@ -1,6 +1,6 @@
-"""Agent 0 Orchestrator (router), Agent 3 Analyst (Gemini plans + specialist/Claims Investigator tools), chat Verifier
-(ledger-based), and the verifier-gated memo polish. The Analyst never falls back to keyword scripting: without
-Gemini it says so and points to the relevant tabs."""
+"""Orchestrator (router), Analyst (Gemini plans + specialist/Claims Investigator tools), Section Writers (parallel,
+one Gemini call per section, verifier-gated), and the ledger-based ref verifier shared by chat answers and the
+memo. The Analyst never falls back to keyword scripting: without Gemini it says so and points to the relevant tabs."""
 import json, re, time
 from typing import Literal
 from pydantic import BaseModel
@@ -227,32 +227,85 @@ def analyse(S, text, history, ledger, memo=None):
             f"The Apollo tabs most relevant to your question: {tabs}."), [], turn["steps"], [], False, []
 
 
-# ---------------- memo polish (one Gemini call per memo, verifier-gated) ----------------
-POLISH_RULES = """You edit a first-draft DVR (reserve review) memo written by a reserving actuary. The input is a JSON object mapping a
-section id to a list of strings. Rewrite each string into clear, concise, professional actuarial prose. HARD RULES: keep every placeholder
-like {{F0012}} exactly; never write a digit yourself; never add facts, reasons or names; keep every [INPUT REQUIRED: ...] marker verbatim.
-Return ONLY a JSON object with the same keys, each a list of the same length and order."""
+# ---------------- Section Writer (parallel, one Gemini call per section) ----------------
+WRITER_SECTIONS = ["pyd", "assumptions", "methods", "selection", "diagnostics", "risks"]
 
 
-def polish_memo(sections, C, trace):
-    """All narrative sections in ONE Gemini call. A sentence that fails tie-out keeps its drafted text."""
-    if not gemini_model():
-        trace("2 Drafting team", f"{gemini_state()['why'] or 'Gemini unavailable'} — memo uses code-drafted wording (all figures cited)"); return
-    idx = {s["id"]: [i for i, b in enumerate(s["blocks"]) if b[0] in ("p", "b")] for s in sections if s["narrative"]}
-    by_id = {s["id"]: s for s in sections}
-    src = {k: [by_id[k]["blocks"][i][1] for i in v] for k, v in idx.items() if v}
+class SectionDraft(BaseModel):
+    texts: list[str]   # same length and order as the section's current paragraphs/bullets/headings
+
+
+SECTION_WRITER_RULES = """You are Scribe's Section Writer for the "<title>" section of a DVR (reserve review) memo on an Apollo
+study: <lob>; sub-segments <segments>; evaluation <evaluation>.
+Rewrite the <n> paragraph(s)/bullet(s) below into clear, professional actuarial prose — same number of items, same order,
+each about the same thing as before (don't merge, split, reorder or drop any). Pull any extra evidence you need with your
+tools. Every number must be a {{Fxxxx}} placeholder copied from a tool result or calculate(); never type a digit. Keep every
+[INPUT REQUIRED: ...] marker verbatim — never answer it yourself. Where you state a judgement or conclusion the data does
+not settle on its own (e.g. your read of a diagnostic or a driver), prefix that sentence "Proposed — actuary to confirm:".
+<instruction>
+Current text (one item per line):
+<texts>
+Return exactly <n> item(s) in "texts", same order."""
+
+
+def section_writer_tools(S, ledger, turn, memo=None):
+    return T.build_tools(S, ledger, turn, T.STUDY_TOOLS + ["calculate", "read_memo_section"], memo) + [_ask_claims_investigator(S, ledger, turn)]
+
+
+def _write_one(S, ledger, sec, instruction="", memo=None):
+    """Rewrite one section's narrative blocks. Returns (section_id, new_texts_or_None, turn, reason_if_kept)."""
+    turn = dict(results=[], steps=[])
+    idx = [i for i, b in enumerate(sec["blocks"]) if b[0] in ("p", "b", "h3")]
+    texts = [sec["blocks"][i][1] for i in idx]
+    if not texts: return sec["id"], None, turn, "no narrative text in this section"
+    rules = SECTION_WRITER_RULES
+    for k, v in dict(title=sec["title"], lob=S.lob, segments=", ".join(S.segments), evaluation=S.evaluation, n=len(texts),
+                     instruction=f"Follow this instruction while keeping every figure and marker: {instruction}" if instruction else "",
+                     texts="\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))).items():
+        rules = rules.replace(f"<{k}>", str(v))
     try:
-        reply = _run(_agent(POLISH_RULES), json.dumps(src))
-        out = json.loads(re.search(r"\{.*\}", re.sub(r"```(json)?", "", reply), re.S).group(0))
+        out = _run(_agent(rules, section_writer_tools(S, ledger, turn, memo), output_schema=SectionDraft),
+                   f"Rewrite the {len(texts)} item(s) listed in your instructions.")
     except Exception as e:
-        if not isinstance(e, (ValueError, AttributeError)): _api_failed(e)
-        trace("2 Drafting team", f"Gemini polish skipped ({gemini_state()['why'] or 'unreadable reply'}) — code-drafted wording kept"); return
-    kept = total = 0
-    for k, old_list in src.items():
-        new_list = out.get(k) if isinstance(out.get(k), list) and len(out.get(k)) == len(old_list) else [None] * len(old_list)
-        for i, new, old in zip(idx[k], new_list, old_list):
-            total += 1
-            if isinstance(new, str) and sorted(D.PH.findall(new)) == sorted(D.PH.findall(old)) and not D.untraced(new, C) \
-                    and new.count("[INPUT REQUIRED") == old.count("[INPUT REQUIRED"):
-                by_id[k]["blocks"][i] = (by_id[k]["blocks"][i][0], new); kept += 1
-    trace("4 Verifier", f"Gemini polished the memo in 1 call; {kept}/{total} sentences passed tie-out (the rest keep the drafted wording)")
+        _api_failed(e); return sec["id"], None, turn, gemini_state()["why"] or "Gemini error"
+    new_texts = getattr(out, "texts", None)
+    if not new_texts or len(new_texts) != len(texts):
+        return sec["id"], None, turn, f"expected {len(texts)} rewritten item(s), got {len(new_texts or [])}"
+    issues = []
+    for old, new in zip(texts, new_texts):
+        issues += untraced(new, ledger)
+        if new.count("[INPUT REQUIRED") != old.count("[INPUT REQUIRED"): issues.append("an [INPUT REQUIRED] marker changed")
+    if issues: return sec["id"], None, turn, f"failed tie-out: {'; '.join(issues[:3])}"
+    return sec["id"], new_texts, turn, None
+
+
+def write_sections(S, sections, ledger, brief, trace, memo=None):
+    """Section Writers rewrite the narrative sections in parallel (one Gemini call each, bounded by the per-key
+    rate limiter); a section that fails tie-out, or any call made while Gemini is unavailable, keeps its
+    code-drafted wording."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    by_id = {s["id"]: s for s in sections}
+    targets = [by_id[i] for i in WRITER_SECTIONS if i in by_id and any(b[0] in ("p", "b", "h3") for b in by_id[i]["blocks"])]
+    if not targets: return
+    if not gemini_model():
+        trace("Drafting team", f"{gemini_state()['why'] or 'Gemini unavailable'} — narrative sections use code-drafted wording"); return
+    rewritten = []
+    with ThreadPoolExecutor(max_workers=len(targets)) as ex:
+        futures = {ex.submit(_write_one, S, ledger, s, "", memo): s["id"] for s in targets}
+        for fut in as_completed(futures):
+            section_id, new_texts, turn, why = fut.result()
+            for agent, msg in turn["steps"]: trace(agent, msg)
+            if new_texts:
+                sec = by_id[section_id]; idx = [i for i, b in enumerate(sec["blocks"]) if b[0] in ("p", "b", "h3")]
+                for i, t in zip(idx, new_texts): sec["blocks"][i] = (sec["blocks"][i][0], t)
+                rewritten.append(section_id)
+            trace("Section Writer", f"{section_id}: " + ("rewritten" if new_texts else f"kept code-drafted wording ({why})"))
+    trace("Verifier", f"Section Writer rewrote {len(rewritten)}/{len(targets)} section(s); the rest keep their code-drafted wording")
+
+
+def redraft_section(S, ledger, memo_state, section_id, instruction):
+    """edit_section intent: Section Writer redraft of ONE existing memo section. Returns (ok, new_texts_or_reason, steps)."""
+    sec = next((s for s in memo_state.sections if s["id"] == section_id), None)
+    if sec is None: return False, f"no memo section '{section_id}'", []
+    _, new_texts, turn, why = _write_one(S, ledger, sec, instruction, memo_state)
+    return (True, new_texts, turn["steps"]) if new_texts else (False, why, turn["steps"])

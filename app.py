@@ -154,7 +154,7 @@ def do_draft(status, prompt, prev, ledger, brief_changes, note=""):
     steps.append(("Data Steward", "All required files present"))
     trace = lambda agent, msg: (steps.append((agent, msg)), status.write(f"**{agent}** — {msg}"))
     cid = st.session_state.chat
-    d = D.draft(S, polish=A.polish_memo, trace=trace, brief=b, rejected=rejected, assumptions=assumptions, tag=cid, ledger=ledger)
+    d = D.draft(S, write=A.write_sections, trace=trace, brief=b, rejected=rejected, assumptions=assumptions, tag=cid, ledger=ledger)
     unpaid = " · ".join(f"**{X.reserve_summary(scope, x).summary['Total unpaid']} {x.lower()}**" for x in b["bases"])
     pyd = " · ".join(f"**{list(X.pyd(scope, x).summary['total'].values())[-1]} {x.lower()}**" for x in b["bases"])
     basis = next(s for s in d.sections if s["id"] == "basis")["blocks"][1:]
@@ -184,8 +184,20 @@ def do_analyse(text, history, ledger, memo_state):
     return answer, arts + ([dict(type="meta", gemini=True)] if gemini else [])
 
 
-NOT_YET = {"edit_section": "Editing a single section isn't built yet in this preview", "fill_gaps": "Filling the memo's open items isn't built yet in this preview",
-           "gap_answer": "The interview flow isn't built yet in this preview"}
+NOT_YET = {"fill_gaps": "Filling the memo's open items isn't built yet in this preview", "gap_answer": "The interview flow isn't built yet in this preview"}
+
+
+def do_edit_section(ledger, memo_state, section_id, instruction):
+    ok, result, steps = A.redraft_section(S, ledger, memo_state, section_id, instruction)
+    steps = [("Orchestrator", "Routed to the Drafting team for one section")] + steps
+    if not ok:
+        return f"I couldn't redraft that section right now — {result}. The memo is unchanged.", [dict(type="steps", items=steps)]
+    sec = memo.replace_section(memo_state, section_id, result)
+    memo.rebuild_docx(memo_state)
+    steps.append(("Verifier", f"{sec['title']}: rewrite passed tie-out and replaced the section"))
+    text = f"Updated **{sec['title']}**. Preview the change below or re-download the Word memo."
+    return text, [dict(type="memo", html=D.to_html(memo_state.sections, memo_state.ledger)), dict(type="file", path=memo_state.docx),
+                  dict(type="ledger", json=ledger.to_json()), dict(type="memo_state", json=memo.to_json(memo_state)), dict(type="steps", items=steps)]
 
 
 def handle(prompt, files):
@@ -219,6 +231,12 @@ def handle(prompt, files):
                 note = "" if gemini_routed else f"\n\n*{A.gemini_state()['why'] or 'Gemini is unavailable'} — I could not read any drafting instructions in your message, so this draft uses {'this chat’s previous brief' if memo_state else 'the defaults'}.*"
                 text, arts = do_draft(status, prompt, (last_artifact(cid, "brief") or {}).get("brief"), ledger, intent.brief_changes, note)
                 status.update(label="Memo drafted", state="complete", expanded=False)
+        elif kind == "edit_section":
+            if memo_state is None or not intent.section_id or intent.section_id not in [s["id"] for s in memo_state.sections]:
+                text, arts = f"I don't have a memo section called '{intent.section_id}' in this chat — draft the memo first.", []
+            else:
+                with st.spinner("Redrafting the section…"):
+                    text, arts = do_edit_section(ledger, memo_state, intent.section_id, intent.instruction)
         elif kind in NOT_YET:
             text, arts = f"{NOT_YET[kind]} — ask me to redraft the whole memo with your instruction instead.", []
         else:
