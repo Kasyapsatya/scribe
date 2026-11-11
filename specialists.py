@@ -377,8 +377,10 @@ def scan_study(S, ledger, basis="GROSS"):
             if not S.has(seg, basis, tab): continue
             Dg = diagnostic(S, seg, basis, tab)
             if Dg.summary["calendar_year_shift"]:
+                median = Dg.df.tail(6).Change.abs().median()
+                tag = ledger.tag(median, "pct", f"{Dg.title} | median |change| last 6 AYs")
                 items.append(dict(category="diagnostic", sub_segment=seg, tab=tab,
-                                  text=f"{name} {DIAG[tab][0]}: calendar-year shift {Dg.summary['calendar_year_shift']} on the latest diagonal"))
+                                  text=f"{name} {DIAG[tab][0]}: calendar-year shift {Dg.summary['calendar_year_shift']} on the latest diagonal (median |change| {tag})"))
         if S.ave is not None and (S.ave.sub_segment == seg).any():
             A = ave(S, seg, basis); body = A.df[A.df["Accident year"] != "Total"]
             for _, r in body.reindex(body["A − E"].abs().sort_values(ascending=False).index).head(3).iterrows():

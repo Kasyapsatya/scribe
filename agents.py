@@ -1,7 +1,7 @@
 """Orchestrator (router), Analyst (Gemini plans + specialist/Claims Investigator tools), Section Writers (parallel,
 one Gemini call per section, verifier-gated), and the ledger-based ref verifier shared by chat answers and the
 memo. The Analyst never falls back to keyword scripting: without Gemini it says so and points to the relevant tabs."""
-import json, re, time
+import hashlib, json, re, time
 from typing import Literal
 from pydantic import BaseModel
 from config import resolve_model, make_client, is_quota_error, forget_model, retry_after, key_id
@@ -350,3 +350,87 @@ def interview_turn(S, ledger, memo, text, pending_item_id):
     except Exception as e:
         _api_failed(e); turn["steps"].append(("Orchestrator", f"{gemini_state()['why']} during the interview"))
         return None, turn["steps"]
+
+
+# ---------------- First Look (one Gemini call, cached per study signature) ----------------
+FALLBACK_WHY = {"pyd": "Material prior-year movement — confirm the driver before the memo is finalised.",
+                "ldf": "A judgmental or out-of-range LDF selection — needs a stated rationale.",
+                "diagnostic": "A calendar-year shift on the latest diagonal — check with Claims before relying on it.",
+                "ave": "A large actual-vs-expected deviation — confirm the driver.",
+                "spread": "A wide spread between method indications — the selected ultimate relies on judgement here."}
+FALLBACK_ORDER = ["diagnostic", "ldf", "ave", "pyd", "spread"]
+
+
+def _selector(c):
+    return {k: c[k] for k in ("category", "sub_segment", "accident_year", "age", "tab") if k in c}
+
+
+def first_look_fallback(cands):
+    """Deterministic top 5 (no LLM): one candidate per category in a fixed priority order, then each category's
+    next-ranked candidate, round-robin, until 5 are picked."""
+    by_cat = {}
+    for c in cands: by_cat.setdefault(c["category"], []).append(c)
+    picked = []
+    for rnd in range(max((len(v) for v in by_cat.values()), default=0)):
+        for cat in FALLBACK_ORDER:
+            if len(picked) >= 5: break
+            if rnd < len(by_cat.get(cat, [])): picked.append(by_cat[cat][rnd])
+        if len(picked) >= 5: break
+    return picked[:5]
+
+
+class FirstLookItem(BaseModel):
+    index: int             # index into the numbered scan_study() candidates given to you
+    what_to_check: str      # one short sentence on why this is worth a look
+    question: str           # a short first-person question for a clickable suggestion, e.g. "What drove AL 2021?"
+
+
+class FirstLook(BaseModel):
+    items: list[FirstLookItem]
+
+
+FIRST_LOOK_RULES = """You are Scribe's First Look: the five items most worth a reserving actuary's time when opening
+this Apollo study review. You are given scan_study()'s deterministic candidates, numbered — largest PYD movements,
+judgmental or out-of-range LDF selections, diagnostic calendar-year shifts, largest actual-vs-expected deviations
+(with a driver label), and the widest spreads between method indications. Call ldf_selection, diagnostic,
+actual_vs_expected or method_indications if you want more context on a candidate before judging it.
+Pick the five most worth reviewing — prefer variety across sub-segments and categories over five from one bucket.
+For each, by its number (index): "what_to_check" is one short sentence on why it matters; "question" is a short
+first-person question the actuary could ask next (e.g. "What drove AL 2021?"). Return exactly 5 items (fewer only
+if fewer than 5 candidates were given)."""
+
+
+def first_look_agent(S, ledger, turn):
+    return _agent(FIRST_LOOK_RULES, T.build_tools(S, ledger, turn, ["scan_study", "ldf_selection", "diagnostic", "actual_vs_expected", "method_indications"]),
+                  output_schema=FirstLook)
+
+
+def first_look(S, ledger, signature):
+    """Five items most worth a reviewer's time, cached per study signature (output/first_look_<hash>.json).
+    Only the selection and phrasing are cached — figures are always re-cited fresh into THIS chat's ledger.
+    Returns (items, by_gemini, steps); items = [{"text", "what_to_check", "question"}, ...]."""
+    cands = X.scan_study(S, ledger)
+    by_sel = [(_selector(c), c) for c in cands]
+    cache_path = D.OUT / f"first_look_{hashlib.sha256(str(signature).encode()).hexdigest()[:16]}.json"
+    cached = None
+    if cache_path.exists():
+        try: cached = json.loads(cache_path.read_text())
+        except (json.JSONDecodeError, OSError): cached = None
+    if cached:
+        items = [dict(text=c["text"], what_to_check=e["what_to_check"], question=e["question"]) for e in cached["items"] for sel, c in by_sel if sel == e["selector"]]
+        if items: return items, cached["by_gemini"], [("Orchestrator", "First Look: served from cache for this study")]
+    turn = dict(results=[], steps=[("Orchestrator", "First Look on study open")])
+    if gemini_model():
+        try:
+            listing = [dict(index=i, **sel) for i, (sel, _) in enumerate(by_sel)]
+            out = _run(first_look_agent(S, ledger, turn), f"scan_study() candidates: {json.dumps(listing, default=str)}\nPick the five most worth reviewing.")
+            picks = [(it.index, it.what_to_check, it.question) for it in out.items[:5] if 0 <= it.index < len(cands)]
+            if picks:
+                cache_path.parent.mkdir(exist_ok=True)
+                cache_path.write_text(json.dumps(dict(by_gemini=True, items=[dict(selector=by_sel[i][0], what_to_check=w, question=q) for i, w, q in picks])))
+                return [dict(text=by_sel[i][1]["text"], what_to_check=w, question=q) for i, w, q in picks], True, turn["steps"]
+        except Exception as e:
+            _api_failed(e); turn["steps"].append(("Orchestrator", f"{gemini_state()['why']} — First Look uses the deterministic candidates"))
+    items = [dict(text=c["text"], what_to_check=FALLBACK_WHY.get(c["category"], "Worth a look."), question=f"What's behind {c['text'].split(':')[0]}?")
+             for c in first_look_fallback(cands)]
+    return items, False, turn["steps"]

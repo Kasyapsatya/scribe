@@ -111,6 +111,13 @@ def render(msg, idx, last, ledger):
             elif t == "graph": st.graphviz_chart(a["dot"])
             elif t == "steps": steps = a
             elif t == "figures": figs = a
+            elif t == "first_look":
+                st.markdown(md("**First Look** — five things worth a look before the memo is drafted:"))
+                st.markdown(md("\n".join(f"- {it['text']} — {it['what_to_check']}" for it in a["items"])))
+                if last:
+                    cols = st.columns(3)
+                    for j, it in enumerate(a["items"]):
+                        if cols[j % 3].button(it["question"], key=f"fl{idx}_{j}", width="stretch"): st.session_state.pending = it["question"]
             elif t == "suggestions" and last:
                 cols = st.columns(3)
                 for j, s in enumerate(a["items"]):
@@ -128,6 +135,17 @@ def render(msg, idx, last, ledger):
 def readiness():
     text, _ = steward.readiness_message(S)
     return text, [dict(type="suggestions", items=suggestions(S))]
+
+
+def opening_card():
+    """Readiness + First Look (PLAN_v3 §6/§8) — only when a chat opens, not on every "what data is available" ask."""
+    text, r = steward.readiness_message(S)
+    arts = [dict(type="suggestions", items=suggestions(S))]
+    if r["analysis_ready"]:
+        led = Ledger()
+        items, by_gemini, steps = A.first_look(S, led, signature(data_dir()))
+        if items: arts = [dict(type="first_look", items=items), dict(type="ledger", json=led.to_json()), dict(type="steps", items=steps)] + arts
+    return text, arts
 
 
 def last_artifact(cid, kind):
@@ -275,14 +293,14 @@ def handle(prompt, files):
 
 # ---------------- layout ----------------
 if "chat" not in st.session_state:
-    st.session_state.chat = store.new_chat(); store.add(st.session_state.chat, "assistant", *readiness())
+    st.session_state.chat = store.new_chat(); store.add(st.session_state.chat, "assistant", *opening_card())
 
 logo = base64.b64encode(LOGO.read_bytes()).decode()
 head, new, hist, *gear = st.columns([6, 1.6, 1.2, 0.5] if SHOW_KEY else [6, 1.6, 1.2], vertical_alignment="bottom")
 head.markdown(f'<div class="brand"><img src="data:image/png;base64,{logo}" height="34"><span class="app">Scribe · Apollo reserve study assistant</span></div>',
               unsafe_allow_html=True)
 if new.button("＋ New chat", width="stretch", type="primary"):
-    st.session_state.chat = store.new_chat(); store.add(st.session_state.chat, "assistant", *readiness()); st.rerun()
+    st.session_state.chat = store.new_chat(); store.add(st.session_state.chat, "assistant", *opening_card()); st.rerun()
 with hist.popover("Chats", width="stretch"):                  # always visible (the sidebar collapses on narrow screens)
     chat_sync.pull()                                           # the team's chats from GitHub (at most once a minute)
     for cid, title, created in store.chats():

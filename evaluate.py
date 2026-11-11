@@ -1,5 +1,5 @@
 """Evaluation suite (CLAUDE.md §8). Offline checks run without Gemini; the Q&A golden set needs Gemini.  Run: python evaluate.py"""
-import json, re, shutil, tempfile
+import hashlib, json, re, shutil, tempfile
 from pathlib import Path
 from docx import Document
 from openpyxl import load_workbook
@@ -254,6 +254,39 @@ def run(S=None, qa=False):
         A.gemini_model = orig_gemini_model
     out.append(check("Interviewer: list_open_inputs/fill_input work standalone; interview_turn fails clearly when Gemini is off",
                      len(items8_after) == len(items8) - 1 and filled8["item_id"] == items8[0]["item_id"] and out9 is None and bool(steps9)))
+    # 22 First Look fallback: deterministic, varied categories, each line carries a ref
+    cands10 = X.scan_study(S, Ledger())
+    picked10 = A.first_look_fallback(cands10)
+    out.append(check("First Look fallback: up to 5 items, no Gemini, each line cites a figure",
+                     1 <= len(picked10) <= 5 and len({c["category"] for c in picked10}) >= min(3, len({c["category"] for c in cands10}))
+                     and all("[F" in c["text"] for c in picked10)))
+    # 23 First Look caching: selection/phrasing cached per signature; figures are re-cited fresh for a different ledger
+    sig10 = ("test-sig-" + hashlib.sha256(b"evaluate.py").hexdigest()[:8],)
+    cache_path10 = D.OUT / f"first_look_{hashlib.sha256(str(sig10).encode()).hexdigest()[:16]}.json"
+    cache_path10.unlink(missing_ok=True)
+    A.gemini_model = lambda: None
+    try:
+        led11, led12 = Ledger(), Ledger()
+        items11, by_gemini11, steps11 = A.first_look(S, led11, sig10)                       # miss -> fallback (Gemini off), not cached (by_gemini False)
+        items12, by_gemini12, steps12 = A.first_look(S, led12, sig10)                       # fallback again: nothing was cached for a non-Gemini result
+    finally:
+        A.gemini_model = orig_gemini_model
+        cache_path10.unlink(missing_ok=True)
+    out.append(check("First Look: Gemini-off results are never cached (fallback runs fresh each time)",
+                     not by_gemini11 and not by_gemini12 and not cache_path10.exists()))
+    # 24 First Look cache hit: reuses the cached selection/phrasing but re-derives the figure fresh for this ledger
+    sig13 = ("test-sig-hit-" + hashlib.sha256(b"evaluate2").hexdigest()[:8],)
+    cache_path13 = D.OUT / f"first_look_{hashlib.sha256(str(sig13).encode()).hexdigest()[:16]}.json"
+    cache_path13.parent.mkdir(exist_ok=True)
+    cache_path13.write_text(json.dumps(dict(by_gemini=True, items=[dict(selector=A._selector(cands10[0]), what_to_check="Cached reason.", question="Cached question?")])))
+    try:
+        led14 = Ledger(); items14, by_gemini14, steps14 = A.first_look(S, led14, sig13)
+    finally:
+        cache_path13.unlink(missing_ok=True)
+    ref_match = re.search(r"\[(F\d{4})\]", items14[0]["text"]) if items14 else None
+    out.append(check("First Look: a cache hit reuses the cached phrasing and re-derives the figure fresh for this ledger",
+                     by_gemini14 and len(items14) == 1 and items14[0]["what_to_check"] == "Cached reason." and items14[0]["question"] == "Cached question?"
+                     and bool(ref_match) and ref_match.group(1) in led14.items))
     # 8 Q&A golden set (Gemini)
     if qa:
         gold = [("What is the total net PYD for General Liability?", X.pyd(S, "NET", "GL").summary["total"]["General Liability"]),
@@ -299,6 +332,18 @@ def run(S=None, qa=False):
         verbatim_ok = ok8 and any(b[0] == "u" and ans_text in b[2] for b in filled_sec["blocks"])
         out.append(check("Interviewer (Gemini): offers the top-ranked item, records the actuary's answer verbatim, offers the next item",
                          ok8 and verbatim_ok and bool(out2) and not out2.done and out2.item_id != out1.item_id, f"item1={out1.item_id if out1 else None}"))
+        # First Look: five items, each citing a figure; a second call for the same signature hits the cache
+        sig_live = ("evaluate-live",)
+        cache_path_live = D.OUT / f"first_look_{hashlib.sha256(str(sig_live).encode()).hexdigest()[:16]}.json"
+        cache_path_live.unlink(missing_ok=True)
+        try:
+            led15 = Ledger(); items15, by_gemini15, _ = A.first_look(S, led15, sig_live)
+            led16 = Ledger(); items16, by_gemini16, steps16 = A.first_look(S, led16, sig_live)
+        finally:
+            cache_path_live.unlink(missing_ok=True)
+        out.append(check("First Look (Gemini): five items each citing a figure; a repeat call for the same study hits the cache",
+                         by_gemini15 and len(items15) == 5 and all("[F" in it["text"] for it in items15)
+                         and by_gemini16 and any("cache" in s[1].lower() for s in steps16), f"{len(items15)} items"))
     return out
 
 
