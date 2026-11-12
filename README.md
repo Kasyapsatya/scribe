@@ -1,7 +1,8 @@
-# Scribe v2 — Apollo DVR chat agents (prototype, synthetic data)
+# Scribe v3 — Apollo DVR chat agents (prototype, synthetic data)
 
-One Accenture-branded chat over an Apollo reserve study: **draft** the DVR memo, or **analyse** anything in the study.
-See `CLAUDE.md` for the locked design.
+One Accenture-branded chat over an Apollo reserve study: an Orchestrator routes every message to **draft**, **edit**
+or **fill gaps** in the DVR memo, or to **analyse** anything in the study — every number a reference back to its
+source cell, never typed by an LLM. See `CLAUDE.md` for the locked design and `PLAN_v3.md` for how it got here.
 
 ## Run (Windows)
 ```
@@ -12,15 +13,21 @@ copy .streamlit\secrets.toml.example .streamlit\secrets.toml    # paste your Gem
 streamlit run app.py
 ```
 The first answer that needs Gemini checks which model your key can use (≤ 1 min) and remembers it for 24 h.
-If Gemini is unavailable (quota or network) Scribe says so: the Analyst points you to the relevant Apollo tabs, and drafting still works (code-written wording and default drafting choices, all figures cited).
+If Gemini is unavailable (quota or network) Scribe says so: the Analyst points you to the relevant Apollo tabs,
+Section Writers keep their code-drafted wording, and drafting itself always works (default choices, all figures cited).
 
 ## Use
-- On opening, the **Data Steward** checks the files in `data/inputs/` and says what is ready or missing.
+- On opening, the **Data Steward** checks the files in `data/inputs/` and says what is ready or missing, then
+  **First Look** offers the five items most worth reviewing (clickable follow-up questions).
 - Ask anything: "Summarise how LDFs were selected for GL", "Select BF for all accident years for GL — how do ultimates change?",
-  "Show the average case OS diagnostic for Workers Comp", "What drove AvE on AL 2021?", "Draft the DVR memo".
+  "Show the average case OS diagnostic for Workers Comp", "What drove AvE on AL 2021?", "Why does the memo say X?", "Draft the DVR memo".
 - Steer the draft in your own words, e.g. "Draft the memo for the Casualty business; sensitivity low = lowest method, high = highest method; explain AvE above $1m;
-  business description: …". The **Brief agent** reads it, Python checks it, and the memo opens with a *Basis of this draft* note
+  business description: …". The **Orchestrator** reads it in the same call that routes the message, Python checks
+  every choice against the study and your words, and the memo opens with a *Basis of this draft* note
   (applied / default / not applied). "Redraft with high = Paid BF" changes one choice.
+- "Make the PYD section shorter" redrafts just that section. "Let's fill the gaps" starts an interview over the
+  memo's open `[INPUT REQUIRED]` items, most material first — "skip" moves on, "stop" ends it.
+- Every answer carries a collapsed **Figures** panel (ref → value → source) and a **How I got this** trace.
 - Attach files with the **+** in the chat box (Apollo `.xlsx`, claims/AvE `.csv`); they are saved to `data/inputs/` and re-checked.
 - Chats are stored in `output/scribe.db`; open past chats from the **Chats** button in the header.
 
@@ -39,11 +46,14 @@ If Gemini is unavailable (quota or network) Scribe says so: the Analyst points y
 ## Files
 | File | Role |
 |---|---|
-| `app.py` | Chat UI, chat storage wiring, handlers |
-| `agents.py` | Orchestrator (routing), Brief agent, Analyst (Gemini + tools), chat Verifier, memo polish |
-| `brief.py` | Drafting brief: user-steerable choices, defaults, validation, basis note |
-| `specialists.py` | Specialist agents: reserves, PYD, reinsurance, LDF Explainer, methods/what-if/sensitivity, Diagnostics, AvE, Claims Investigator, Exhibit reader, Study Navigator |
-| `drafting.py` | Drafting team, memo Verifier, Word Assembler, memo preview |
+| `app.py` | Chat UI, chat storage wiring, handlers, ledger/memo-state persistence |
+| `agents.py` | Orchestrator, Analyst, Claims Investigator, Section Writers, Interviewer, First Look, chat ref verifier |
+| `tools.py` | Tool closures the agents call, per-agent allow-lists, ledger-tagged results |
+| `ledger.py` | Evidence ledger: `{{Fxxxx}}` refs, `calculate`, `explain`, the ref verifier, JSON persistence |
+| `memo.py` | Per-chat memo state: read/search sections, replace a section's text, open-items ranking, verbatim fill, docx rebuild |
+| `brief.py` | Drafting brief: user-steerable choices, defaults, validation, basis note, BF assumption |
+| `specialists.py` | Deterministic specialists: reserves, PYD, reinsurance, LDF selection, methods/what-if/sensitivity, diagnostics, AvE, claim movements, First Look candidate scan, exhibit reader, study navigator |
+| `drafting.py` | Drafting team (code-drafted sections + Section Writer pass), memo Verifier, Word Assembler, memo preview |
 | `steward.py` | Data Steward (readiness check) |
 | `study.py` | Apollo parser (label + column number), shared Result format and number formatting |
 | `store.py` | SQLite chat storage |
@@ -51,4 +61,5 @@ If Gemini is unavailable (quota or network) Scribe says so: the Analyst points y
 | `chats/` | Saved chats (Markdown references; the app reads them back) |
 | `config.py` | Secrets, per-session key, per-key rate limit, Gemini model selection (timeouts, no retries) |
 | `gen_synthetic.py` | Regenerates the synthetic study in `data/inputs/` and `data/golden_labels.json` |
-| `evaluate.py` | Evaluation suite: `python evaluate.py` (add `--qa` to include the Gemini Q&A set) |
+| `evaluate.py` | Evaluation suite: `python evaluate.py` (add `--qa` to include the live Gemini checks) |
+| `PLAN_v3.md` | The phased plan this architecture was built from |

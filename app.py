@@ -28,20 +28,26 @@ def suggestions(S):
             f"Show the average case OS diagnostic for {c}"]
 ABOUT = """**How I work** — a team of agents over your Apollo study:
 
-- **Orchestrator** reads each message in one call: what you want (draft, a question, a data check...), its scope, and
-  any drafting instructions — checked against the study and your own words before anything happens.
-- **Data Steward** checks every file before work starts.
-- **Drafting team** builds each memo section from defined Apollo columns, then the **Verifier** ties every figure to its source cell and the **Assembler** writes the Word memo.
-- **Analyst** answers questions using specialist tools: Study Navigator, Exhibit reader, LDF Explainer, Diagnostics, Scenario (re-weights Apollo's own method indications), and the **Claims Investigator** sub-agent, which reads claim-level descriptions for "why" questions.
+- **Orchestrator** reads each message in one call: what you want (draft, edit a section, fill the gaps, a question,
+  a data check...), its scope, and any drafting instructions — checked against the study and your own words before anything happens.
+- **Data Steward** checks every file before work starts; **First Look** greets a new chat with the five items most worth reviewing.
+- **Drafting team** builds each memo section from defined Apollo columns; **Section Writers** write the narrative
+  sections in parallel (one per section) and can redraft a single section on request; the **Verifier** ties every
+  figure to its source cell and the **Assembler** writes the Word memo.
+- **Analyst** answers questions using specialist tools — Study Navigator, Exhibit reader, LDF Explainer, Diagnostics,
+  Scenario (re-weights Apollo's own method indications) — and the **Claims Investigator** sub-agent, which reads
+  claim-level loss descriptions for "why" questions.
+- **Interviewer** fills the memo's open items conversationally, most material first, recording your own words verbatim.
 
 Every figure — in chat or in the memo — is a reference back to its source cell, never a number I wrote myself; the collapsed **Figures** panel under an answer shows where each one came from."""
 DOT = """digraph{rankdir=LR;bgcolor="transparent";node[shape=box,style="rounded,filled",fillcolor="#F6F3FA",color="#A100FF",fontname=Arial,fontsize=10];
-U[label="You",shape=oval,fillcolor="#FFFFFF"];O[label="Orchestrator (Gemini)",fillcolor="#E9D7FF"];DS[label="Data Steward"];
-subgraph cluster_d{label="Drafting";color="#CCCCCC";DT[label="Drafting team"];V1[label="Verifier"];AS[label="Assembler → .docx"]}
+U[label="You",shape=oval,fillcolor="#FFFFFF"];O[label="Orchestrator (Gemini)",fillcolor="#E9D7FF"];DS[label="Data Steward"];FL[label="First Look (Gemini)"];
+subgraph cluster_d{label="Drafting";color="#CCCCCC";DT[label="Drafting team"];SW[label="Section Writers (Gemini)"];IV[label="Interviewer (Gemini)"];V1[label="Verifier"];AS[label="Assembler → .docx"]}
 subgraph cluster_a{label="Analysis";color="#CCCCCC";AN[label="Analyst (Gemini)"];N[label="Study Navigator"];E[label="Exhibit reader"];L[label="LDF Explainer"];
 DG[label="Diagnostics"];SC[label="Scenario"];CI[label="Claims Investigator (Gemini)"];V2[label="Ref verifier"]}
 F[label="Apollo packs · claims · AvE",shape=cylinder,fillcolor="#FFFFFF"];LG[label="Evidence ledger",shape=cylinder,fillcolor="#FFFFFF"];
-U->O;O->DS;O->DT->V1->AS;O->AN;AN->{N E L DG SC};AN->CI;AN->V2;{DS N E L DG SC CI DT}->F[style=dotted,arrowhead=none];{DT AN V1 V2}->LG[style=dotted,arrowhead=none]}"""
+U->O;O->DS;O->FL;O->DT->SW->V1->AS;O->IV;O->AN;AN->{N E L DG SC};AN->CI;SW->CI;AN->V2;
+{DS FL N E L DG SC CI DT SW IV}->F[style=dotted,arrowhead=none];{DT SW IV AN V1 V2 FL}->LG[style=dotted,arrowhead=none]}"""
 
 st.set_page_config(page_title="Scribe | Accenture", page_icon=AVATAR, layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
